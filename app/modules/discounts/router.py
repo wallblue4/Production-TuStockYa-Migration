@@ -12,7 +12,7 @@ router = APIRouter()
 @router.post("/request", response_model=DiscountRequestResponse)
 async def create_discount_request(
     discount_data: DiscountRequestCreate,
-    current_user = Depends(require_roles(["vendedor", "administrador", "boss"])),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
     db: Session = Depends(get_db)
 ):
     """
@@ -42,7 +42,7 @@ async def create_discount_request(
 
 @router.get("/my-requests", response_model=MyDiscountRequestsResponse)
 async def get_my_discount_requests(
-    current_user = Depends(require_roles(["vendedor", "administrador", "boss"])),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
     db: Session = Depends(get_db)
 ):
     """

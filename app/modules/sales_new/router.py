@@ -24,7 +24,7 @@ async def create_sale_complete(
     notes: str = Form("", description="Notas adicionales"),
     requires_confirmation: bool = Form(False, description="Requiere confirmación posterior"),
     receipt_image: Optional[UploadFile] = File(None, description="Comprobante de pago"),
-    current_user = Depends(require_roles(["vendedor", "administrador", "boss"])),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
     db: Session = Depends(get_db)
 ):
     """
@@ -34,7 +34,7 @@ async def create_sale_complete(
     - Registro de venta con fecha automática
     - Productos vendidos con detalles completos
     - Múltiples métodos de pago
-    - Comprobante opcional
+    - Comprobante opcional subido a Cloudinary ✅
     - Actualización automática de inventario
     - Sistema de confirmación opcional
     """
@@ -54,22 +54,27 @@ async def create_sale_complete(
             requires_confirmation=requires_confirmation
         )
         
-        # Procesar venta
-        return await service.create_sale_complete(
+        # Procesar venta con imagen
+        result = await service.create_sale_complete(
             sale_data=sale_request,
-            receipt_image=receipt_image,
+            receipt_image=receipt_image,  # UploadFile o None
             seller_id=current_user.id,
             location_id=current_user.location_id
         )
         
+        return result
+        
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Datos JSON inválidos: {str(e)}")
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Error inesperado en endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error procesando venta: {str(e)}")
 
 @router.get("/today", response_model=DailySalesResponse)
 async def get_today_sales(
-    current_user = Depends(require_roles(["vendedor", "administrador", "boss"])),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
     db: Session = Depends(get_db)
 ):
     """
@@ -89,7 +94,7 @@ async def get_today_sales(
 
 @router.get("/pending-confirmation", response_model=PendingSalesResponse)
 async def get_pending_confirmation_sales(
-    current_user = Depends(require_roles(["vendedor", "administrador", "boss"])),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
     db: Session = Depends(get_db)
 ):
     """Obtener ventas pendientes de confirmación"""
@@ -99,7 +104,7 @@ async def get_pending_confirmation_sales(
 @router.post("/confirm")
 async def confirm_sale(
     confirmation: SaleConfirmationRequest,
-    current_user = Depends(require_roles(["vendedor", "administrador", "boss"])),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
     db: Session = Depends(get_db)
 ):
     """Confirmar o rechazar una venta pendiente"""

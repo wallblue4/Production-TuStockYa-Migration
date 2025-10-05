@@ -18,7 +18,7 @@ async def create_expense(
     amount: float = Form(..., description="Monto del gasto", gt=0),
     notes: str = Form("", description="Notas adicionales"),
     receipt_image: Optional[UploadFile] = File(None, description="Comprobante del gasto"),
-    current_user = Depends(require_roles(["vendedor", "administrador", "boss"])),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
     db: Session = Depends(get_db)
 ):
     """
@@ -48,7 +48,7 @@ async def create_expense(
 
 @router.get("/today", response_model=DailyExpensesResponse)
 async def get_today_expenses(
-    current_user = Depends(require_roles(["vendedor", "administrador", "boss"])),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
     db: Session = Depends(get_db)
 ):
     """
@@ -69,7 +69,7 @@ async def get_today_expenses(
 
 @router.get("/categories")
 async def get_expense_categories(
-    current_user = Depends(require_roles(["vendedor", "administrador", "boss"])),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
     db: Session = Depends(get_db)
 ):
     """Obtener categorías y conceptos sugeridos para gastos"""

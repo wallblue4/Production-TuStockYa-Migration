@@ -12,7 +12,7 @@ router = APIRouter()
 @router.post("/request", response_model=TransferRequestResponse)
 async def create_transfer_request(
     transfer_data: TransferRequestCreate,
-    current_user = Depends(require_roles(["vendedor", "administrador", "boss"])),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
     db: Session = Depends(get_db)
 ):
     """
@@ -34,7 +34,7 @@ async def create_transfer_request(
 
 @router.get("/my-requests", response_model=MyTransferRequestsResponse)
 async def get_my_transfer_requests(
-    current_user = Depends(require_roles(["vendedor", "administrador", "boss"])),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
     db: Session = Depends(get_db)
 ):
     """

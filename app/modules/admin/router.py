@@ -703,7 +703,7 @@ async def get_admin_statistics(
         },
         "managed_users": len(managed_users),
         "users_by_role": {
-            "vendedores": len([u for u in managed_users if u.role == "vendedor"]),
+            "vendedores": len([u for u in managed_users if u.role == "seller"]),
             "bodegueros": len([u for u in managed_users if u.role == "bodeguero"]),
             "corredores": len([u for u in managed_users if u.role == "corredor"])
         },

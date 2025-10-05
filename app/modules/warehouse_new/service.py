@@ -83,27 +83,64 @@ class WarehouseService:
             }
         )
     
-    async def deliver_to_courier(self, delivery: CourierDelivery, warehouse_keeper_id: int) -> Dict[str, Any]:
-        """BG003: Entregar productos a corredor con descuento automático de inventario"""
+    # warehouse_new/service.py
+
+    async def deliver_to_courier(
+        self, 
+        delivery: CourierDelivery, 
+        warehouse_keeper_id: int
+    ) -> Dict[str, Any]:
+        """BG003: Entregar productos a corredor con todas las validaciones"""
         
+        # Validar permisos del bodeguero
+        managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id)
+        location_ids = [loc['location_id'] for loc in managed_locations]
+        
+        if not location_ids:
+            raise HTTPException(
+                status_code=403, 
+                detail="No tienes ubicaciones asignadas como bodeguero"
+            )
+        
+        # Validar que la transferencia es de una ubicación gestionada
+        transfer = self.db.query(TransferRequest).filter(
+            TransferRequest.id == delivery.transfer_request_id
+        ).first()
+        
+        if not transfer:
+            raise HTTPException(status_code=404, detail="Transferencia no encontrada")
+        
+        if transfer.source_location_id not in location_ids:
+            raise HTTPException(
+                status_code=403, 
+                detail=f"No tienes permisos para gestionar la ubicación origen (ID: {transfer.source_location_id})"
+            )
+        
+        # Preparar datos
         delivery_data = {
             'courier_id': delivery.courier_id,
             'delivery_notes': delivery.delivery_notes
         }
         
-        success = self.repository.deliver_to_courier(delivery.transfer_request_id, delivery_data)
-        
-        if not success:
-            raise HTTPException(status_code=404, detail="Transferencia no encontrada")
-        
-        return {
-            "success": True,
-            "message": "Producto entregado a corredor - Inventario actualizado",
-            "request_id": delivery.transfer_request_id,
-            "inventory_updated": True,
-            "delivered_at": datetime.now().isoformat(),
-            "next_step": "Corredor transportará el producto"
-        }
+        try:
+            # Llamar al repository que hace toda la lógica
+            result = self.repository.deliver_to_courier(
+                delivery.transfer_request_id, 
+                delivery_data
+            )
+            
+            return {
+                "success": True,
+                "message": "Producto entregado a corredor - Inventario actualizado automáticamente",
+                **result
+            }
+            
+        except ValueError as e:
+            # Re-lanzar errores de validación
+            raise HTTPException(status_code=400, detail=str(e))
+        except RuntimeError as e:
+            # Re-lanzar errores del sistema
+            raise HTTPException(status_code=500, detail=str(e))
     
     async def get_inventory_by_location(self, location_id: int) -> InventoryByLocationResponse:
         """BG006: Consultar inventario disponible por ubicación"""

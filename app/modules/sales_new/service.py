@@ -1,101 +1,106 @@
-# app/modules/sales_new/service.py
-import json
-from typing import Dict, Any, List
-from datetime import date, datetime
-from decimal import Decimal
+# app/modules/sales_new/service.py - VERSIÓN SIMPLIFICADA
 from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
+from typing import Optional
+from datetime import date , datetime
+from decimal import Decimal
+import logging
 
 from .repository import SalesRepository
 from .schemas import SaleCreateRequest, SaleResponse, DailySalesResponse
-from app.shared.services.inventory_service import InventoryService
+from app.shared.services.cloudinary_service import cloudinary_service
+from app.shared.database.models import Location , Sale
+
+
+logger = logging.getLogger(__name__)
 
 class SalesService:
     def __init__(self, db: Session):
         self.db = db
         self.repository = SalesRepository(db)
-        self.inventory_service = InventoryService()
+        self.cloudinary = cloudinary_service
     
     async def create_sale_complete(
         self,
         sale_data: SaleCreateRequest,
-        receipt_image: UploadFile,
+        receipt_image: Optional[UploadFile],
         seller_id: int,
         location_id: int
     ) -> SaleResponse:
-        """Crear venta completa con actualización de inventario"""
+        """
+        Crear venta completa.
         
+        Responsabilidades:
+        - Validar ubicación
+        - Subir recibo (no crítico)
+        - Delegar transacción al repository
+        - Construir respuesta
+        """
         try:
-            # 1. Validar disponibilidad de productos
-            await self._validate_product_availability(sale_data.items, f"Local #{location_id}")
+            logger.info(f"Iniciando venta - Vendedor: {seller_id}, Location: {location_id}")
             
-            # 2. Crear venta en BD
-            sale_dict = sale_data.dict()
-            sale = self.repository.create_sale(sale_dict, seller_id, location_id)
+            # PASO 1: Obtener ubicación
+            location = self.db.query(Location).filter(
+                Location.id == location_id
+            ).first()
             
-            # 3. Actualizar inventario
-            items_for_inventory = [
-                {
-                    'sneaker_reference_code': item.sneaker_reference_code,
-                    'size': item.size,
-                    'quantity': item.quantity
-                }
-                for item in sale_data.items
-            ]
+            if not location:
+                raise HTTPException(404, detail=f"Ubicación {location_id} no encontrada")
             
-            inventory_updated = self.inventory_service.update_stock_after_sale(
-                self.db, items_for_inventory, seller_id, f"Local #{location_id}"
-            )
+            logger.info(f"Ubicación: '{location.name}'")
             
-            if not inventory_updated:
-                # Rollback sale if inventory update fails
-                self.db.delete(sale)
-                self.db.commit()
-                raise HTTPException(
-                    status_code=400,
-                    detail="Error actualizando inventario. Venta cancelada."
+            # PASO 2: Subir recibo (no crítico - no bloquea venta)
+            receipt_url = await self._upload_receipt_safe(receipt_image, seller_id)
+            
+            # PASO 3: Crear venta (TRANSACCIÓN ATÓMICA en repository)
+            try:
+                sale = self.repository.create_sale_atomic(
+                    sale_data=sale_data.dict(),
+                    seller_id=seller_id,
+                    location_id=location_id,
+                    location_name=location.name,
+                    receipt_url=receipt_url
                 )
+                
+                logger.info(f"Venta {sale.id} completada exitosamente")
+                
+                return self._build_response(sale, sale_data, receipt_url)
+                
+            except Exception as e:
+                # Si falla venta, limpiar imagen subida
+                if receipt_url:
+                    await self._delete_receipt_safe(receipt_url)
+                raise
             
-            # 4. Procesar imagen de recibo si existe
-            receipt_path = None
-            if receipt_image:
-                receipt_path = await self._save_receipt_image(receipt_image, sale.id)
-            
-            return SaleResponse(
-                success=True,
-                message="Venta registrada exitosamente",
-                sale_id=sale.id,
-                total_amount=sale.total_amount,
-                status=sale.status,
-                requires_confirmation=sale.requires_confirmation,
-                created_at=sale.sale_date,
-                items_count=len(sale_data.items),
-                payment_methods_count=len(sale_data.payment_methods),
-                inventory_updated=inventory_updated
-            )
-            
+        except HTTPException:
+            raise
         except Exception as e:
-            self.db.rollback()
-            raise HTTPException(status_code=500, detail=f"Error creando venta: {str(e)}")
+            logger.exception("Error inesperado creando venta")
+            raise HTTPException(500, detail=f"Error creando venta: {str(e)}")
     
-    async def get_daily_sales(self, seller_id: int, target_date: date) -> DailySalesResponse:
-        """Obtener ventas del día"""
+    async def get_daily_sales(
+        self, 
+        seller_id: int, 
+        target_date: date
+    ) -> DailySalesResponse:
+        """Obtener ventas del día con resumen"""
         sales = self.repository.get_sales_by_seller_and_date(seller_id, target_date)
         summary = self.repository.get_daily_sales_summary(seller_id, target_date)
         
-        sales_data = []
-        for sale in sales:
-            items = self.repository.get_sale_items(sale.id)
-            sales_data.append({
+        sales_data = [
+            {
                 "id": sale.id,
                 "total_amount": float(sale.total_amount),
                 "status": sale.status,
                 "confirmed": sale.confirmed,
                 "requires_confirmation": sale.requires_confirmation,
                 "sale_date": sale.sale_date.isoformat(),
-                "items_count": len(items),
-                "notes": sale.notes
-            })
+                "items_count": len(self.repository.get_sale_items(sale.id)),
+                "notes": sale.notes,
+                "receipt_image_url": sale.receipt_image
+            }
+            for sale in sales
+        ]
         
         return DailySalesResponse(
             success=True,
@@ -106,12 +111,20 @@ class SalesService:
             seller_info={"seller_id": seller_id}
         )
     
-    async def confirm_sale(self, sale_id: int, confirmed: bool, confirmation_notes: str, user_id: int) -> Dict[str, Any]:
+    async def confirm_sale(
+        self, 
+        sale_id: int, 
+        confirmed: bool, 
+        confirmation_notes: str, 
+        user_id: int
+    ) -> dict:
         """Confirmar o rechazar una venta"""
-        success = self.repository.confirm_sale(sale_id, confirmed, confirmation_notes, user_id)
+        success = self.repository.confirm_sale(
+            sale_id, confirmed, confirmation_notes, user_id
+        )
         
         if not success:
-            raise HTTPException(status_code=404, detail="Venta no encontrada")
+            raise HTTPException(404, detail="Venta no encontrada")
         
         return {
             "success": True,
@@ -121,7 +134,7 @@ class SalesService:
             "confirmed_at": datetime.now().isoformat()
         }
     
-    async def get_pending_confirmation_sales(self, seller_id: int) -> Dict[str, Any]:
+    async def get_pending_confirmation_sales(self, seller_id: int) -> dict:
         """Obtener ventas pendientes de confirmación"""
         pending_sales = self.repository.get_pending_confirmation_sales(seller_id)
         
@@ -129,12 +142,13 @@ class SalesService:
         total_pending = Decimal('0')
         
         for sale in pending_sales:
+            items = self.repository.get_sale_items(sale.id)
             sales_data.append({
                 "id": sale.id,
                 "total_amount": float(sale.total_amount),
                 "sale_date": sale.sale_date.isoformat(),
                 "notes": sale.notes,
-                "items_count": len(self.repository.get_sale_items(sale.id))
+                "items_count": len(items)
             })
             total_pending += sale.total_amount
         
@@ -145,21 +159,53 @@ class SalesService:
             "total_pending_amount": float(total_pending)
         }
     
-    async def _validate_product_availability(self, items: List, location_name: str):
-        """Validar que todos los productos estén disponibles"""
-        for item in items:
-            availability = self.inventory_service.check_product_availability(
-                self.db, item.sneaker_reference_code, item.size, location_name
-            )
-            
-            if not availability['available'] or availability['quantity'] < item.quantity:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Stock insuficiente para {item.sneaker_reference_code} talla {item.size}"
-                )
+    # MÉTODOS PRIVADOS HELPERS
     
-    async def _save_receipt_image(self, image: UploadFile, sale_id: int) -> str:
-        """Guardar imagen de recibo"""
-        # Implementar lógica de guardado de imagen
-        # Por ahora retornamos un path simulado
-        return f"receipts/sale_{sale_id}_{image.filename}"
+    async def _upload_receipt_safe(
+        self, 
+        receipt_image: Optional[UploadFile], 
+        seller_id: int
+    ) -> Optional[str]:
+        """Subir recibo sin fallar la venta"""
+        if not receipt_image or not receipt_image.filename:
+            return None
+        
+        try:
+            logger.info(f"Subiendo recibo: {receipt_image.filename}")
+            url = await self.cloudinary.upload_receipt_image(
+                receipt_image, "sale", seller_id
+            )
+            logger.info(f"Recibo subido: {url}")
+            return url
+        except Exception as e:
+            logger.warning(f"Error subiendo recibo (continuando): {e}")
+            return None
+    
+    async def _delete_receipt_safe(self, receipt_url: str) -> None:
+        """Eliminar recibo sin fallar"""
+        try:
+            await self.cloudinary.delete_image(receipt_url)
+            logger.info(f"Recibo eliminado: {receipt_url}")
+        except Exception as e:
+            logger.warning(f"Error eliminando recibo: {e}")
+    
+    def _build_response(
+        self, 
+        sale: Sale, 
+        sale_data: SaleCreateRequest,
+        receipt_url: Optional[str]
+    ) -> SaleResponse:
+        """Construir respuesta estandarizada"""
+        return SaleResponse(
+            success=True,
+            message="Venta registrada exitosamente",
+            sale_id=sale.id,
+            total_amount=sale.total_amount,
+            status=sale.status,
+            requires_confirmation=sale.requires_confirmation,
+            created_at=sale.sale_date,
+            items_count=len(sale_data.items),
+            payment_methods_count=len(sale_data.payment_methods),
+            inventory_updated=True,
+            receipt_image_url=receipt_url
+        )

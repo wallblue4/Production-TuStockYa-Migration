@@ -85,3 +85,37 @@ class ClassificationRepository:
             }
             for p in similar
         ]
+    
+    def search_products_by_description(self, model_name: str, brand: str = None) -> List[Dict[str, Any]]:
+        """Buscar productos por descripción y marca"""
+        query = self.db.query(Product)
+        
+        # ✅ BÚSQUEDA FLEXIBLE
+        conditions = or_(
+            Product.description.ilike(f"%{model_name}%"),
+            Product.model.ilike(f"%{model_name}%")
+        )
+        
+        # ✅ SOLO FILTRAR POR MARCA SI NO ES "Unknown"
+        if brand and brand != 'Unknown':
+            conditions = and_(
+                Product.brand.ilike(f"%{brand}%"),
+                conditions
+            )
+        
+        products = query.filter(conditions).limit(10).all()
+        
+        return [
+            {
+                "id": p.id,
+                "reference_code": p.reference_code,
+                "brand": p.brand,
+                "model": p.model,
+                "color_info": p.color_info,
+                "description": p.description,
+                "unit_price": float(p.unit_price),
+                "box_price": float(p.box_price),
+                "image_url": p.image_url
+            }
+            for p in products
+        ]

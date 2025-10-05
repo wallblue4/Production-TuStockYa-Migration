@@ -1,4 +1,4 @@
-# app/modules/sales_new/schemas.py
+# app/modules/sales_new/schemas.py - ACTUALIZADO
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Any
 from decimal import Decimal
@@ -6,20 +6,19 @@ from datetime import datetime
 from app.shared.schemas.common import BaseResponse
 
 class SaleItem(BaseModel):
-    sneaker_reference_code: str = Field(..., description="Código de referencia del producto")
-    brand: str = Field(..., description="Marca del producto")
-    model: str = Field(..., description="Modelo del producto")
-    color: Optional[str] = Field(None, description="Color del producto")
-    size: str = Field(..., description="Talla del producto")
-    quantity: int = Field(..., gt=0, description="Cantidad vendida")
+    sneaker_reference_code: str = Field(..., description="Código de referencia")
+    size: str = Field(..., description="Talla")
+    quantity: int = Field(..., gt=0, description="Cantidad")
     unit_price: Decimal = Field(..., gt=0, description="Precio unitario")
+    
+    # NO incluir brand, model, color - se obtienen de BD
     
     @property
     def subtotal(self) -> Decimal:
         return self.quantity * self.unit_price
 
 class PaymentMethod(BaseModel):
-    type: str = Field(..., description="Tipo: efectivo, tarjeta, transferencia, mixto")
+    type: str = Field(..., description="efectivo, tarjeta, transferencia, mixto")
     amount: Decimal = Field(..., gt=0, description="Monto del pago")
     reference: Optional[str] = Field(None, description="Referencia del pago")
 
@@ -47,11 +46,12 @@ class SaleResponse(BaseResponse):
     items_count: int
     payment_methods_count: int
     inventory_updated: bool
+    receipt_image_url: Optional[str] = None
 
 class SaleConfirmationRequest(BaseModel):
-    sale_id: int = Field(..., description="ID de la venta")
-    confirmed: bool = Field(..., description="Confirmación de la venta")
-    confirmation_notes: Optional[str] = Field(None, max_length=500, description="Notas de confirmación")
+    sale_id: int
+    confirmed: bool
+    confirmation_notes: Optional[str] = Field(None, max_length=500)
 
 class DailySalesResponse(BaseResponse):
     date: str

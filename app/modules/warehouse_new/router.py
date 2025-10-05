@@ -111,8 +111,17 @@ async def deliver_to_courier(
     3. Sistema descuenta inventario automáticamente
     4. Producto queda en tránsito hacia destino
     """
-    service = WarehouseService(db)
-    return await service.deliver_to_courier(delivery, current_user.id)
+    sservice = WarehouseService(db)
+    
+    try:
+        result = await service.deliver_to_courier(delivery, current_user.id)
+        return result
+    except ValueError as e:
+        # Errores de validación (400 Bad Request)
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        # Errores del sistema (500 Internal Server Error)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/inventory-by-location/{location_id}", response_model=InventoryByLocationResponse)
 async def get_inventory_by_location(

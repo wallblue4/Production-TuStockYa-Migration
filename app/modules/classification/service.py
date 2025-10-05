@@ -1,13 +1,13 @@
 # app/modules/classification/service.py
 import httpx
 import asyncio
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 from fastapi import UploadFile, HTTPException
 from sqlalchemy.orm import Session
 
 from .repository import ClassificationRepository
-from .schemas import ScanResponse, ProductMatch, ScanResults
+from .schemas import ProductMatch
 
 class ClassificationService:
     def __init__(self, db: Session):
@@ -15,7 +15,12 @@ class ClassificationService:
         self.repository = ClassificationRepository(db)
         self.microservice_url = "https://sneaker-api-v2.onrender.com"
     
-    async def scan_product(self, image: UploadFile, current_user: Any, include_transfer_options: bool = True) -> Dict[str, Any]:
+    async def scan_product(
+        self, 
+        image: UploadFile, 
+        current_user: Any, 
+        include_transfer_options: bool = True
+    ) -> Dict[str, Any]:
         """Procesar escaneo de producto con IA"""
         start_time = datetime.now()
         
@@ -80,7 +85,7 @@ class ClassificationService:
                 }
             )
     
-    async def _call_classification_microservice(self, image_content: bytes) -> Dict[str, Any]:
+    async def _call_classification_microservice(self, image_content: bytes) -> Optional[Dict[str, Any]]:
         """Llamar al microservicio de clasificación"""
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -105,24 +110,35 @@ class ClassificationService:
         results = classification_result.get('results', [])
         processed_matches = []
         
-        for rank, result in enumerate(results[:5], 1):  # Top 5 resultados
-            # Buscar producto en base de datos local
-            local_products = self.repository.search_products_by_reference(
-                result.get('reference_code', '')
+        for rank, result in enumerate(results[:5], 1):
+            model_name = result.get('model_name', '')
+            original_brand = result.get('brand', 'Unknown')
+            
+            # Extraer marca del model_name si es "Unknown"
+            if original_brand == 'Unknown':
+                final_brand = self._extract_brand_from_model(model_name)
+            else:
+                final_brand = original_brand
+            
+            # Buscar producto en inventario
+            local_products = self.repository.search_products_by_description(
+                model_name=model_name,
+                brand=final_brand
             )
             
             if local_products:
+                # ✅ PRODUCTO ENCONTRADO EN INVENTARIO
                 product = local_products[0]
                 availability = self.repository.get_product_availability(
                     product['id'], f"Local #{current_user.location_id}"
                 )
                 
-                match = ProductMatch(
-                    rank=rank,
-                    similarity_score=result.get('similarity_score', 0.0),
-                    confidence_percentage=result.get('confidence_percentage', 0.0),
-                    confidence_level=result.get('confidence_level', 'low'),
-                    reference={
+                match = {
+                    "rank": rank,
+                    "similarity_score": result.get('similarity_score', 0.0),
+                    "confidence_percentage": result.get('confidence_percentage', 0.0),
+                    "confidence_level": result.get('confidence_level', 'low'),
+                    "reference": {
                         "code": product['reference_code'],
                         "brand": product['brand'],
                         "model": product['model'],
@@ -130,25 +146,75 @@ class ClassificationService:
                         "description": product['description'],
                         "photo": product['image_url'] or ""
                     },
-                    availability=self._format_availability(availability, include_transfer_options),
-                    locations=availability,
-                    pricing={
+                    "availability": self._format_availability(availability, include_transfer_options),
+                    "locations": availability,
+                    "pricing": {
                         "unit_price": product['unit_price'],
                         "box_price": product['box_price'],
                         "has_pricing": True
                     },
-                    classification_source="microservice",
-                    inventory_source="local_database",
-                    brand_extraction={
-                        "original_brand": result.get('brand', ''),
+                    "classification_source": "microservice",
+                    "inventory_source": "local_database",
+                    "brand_extraction": {
+                        "original_brand": original_brand,
                         "final_brand": product['brand'],
                         "extraction_method": "ai_classification"
                     },
-                    suggestions=self._get_product_suggestions(product),
-                    original_db_id=product['id'],
-                    image_path=product['image_url'] or ""
-                )
-                processed_matches.append(match)
+                    "suggestions": self._get_product_suggestions(product),
+                    "original_db_id": product['id'],
+                    "image_path": product['image_url'] or ""
+                }
+            else:
+                # ✅ PRODUCTO NO ENCONTRADO - CREAR RESULTADO BÁSICO DE CLASIFICACIÓN
+                match = {
+                    "rank": rank,
+                    "similarity_score": result.get('similarity_score', 0.0),
+                    "confidence_percentage": result.get('confidence_percentage', 0.0),
+                    "confidence_level": result.get('confidence_level', 'low'),
+                    "reference": {
+                        "code": f"CLASSIFIED-{rank:03d}",
+                        "brand": final_brand,
+                        "model": model_name,
+                        "color": result.get('color', 'Varios'),
+                        "description": f"{final_brand} {model_name}",
+                        "photo": result.get('image_url', f"https://via.placeholder.com/300x300?text={final_brand}+{model_name.replace(' ', '+')}")
+                    },
+                    "availability": {
+                        "summary": {
+                            "current_location": {"has_stock": False, "total_stock": 0},
+                            "other_locations": {"has_stock": False, "total_stock": 0},
+                            "total_system": {"total_stock": 0, "total_locations": 0}
+                        },
+                        "recommended_action": "Producto identificado - No disponible en inventario actual",
+                        "can_sell_now": False,
+                        "can_request_transfer": False
+                    },
+                    "locations": {
+                        "current_location": [],
+                        "other_locations": []
+                    },
+                    "pricing": {
+                        "unit_price": 0.0,
+                        "box_price": 0.0,
+                        "has_pricing": False
+                    },
+                    "classification_source": "microservice",
+                    "inventory_source": "not_in_current_inventory",
+                    "brand_extraction": {
+                        "original_brand": original_brand,
+                        "final_brand": final_brand,
+                        "extraction_method": "enhanced_analysis" if original_brand == "Unknown" else "microservice_direct"
+                    },
+                    "suggestions": {
+                        "can_add_to_inventory": True,
+                        "can_search_suppliers": True,
+                        "similar_products_available": False
+                    },
+                    "original_db_id": result.get('original_db_id'),
+                    "image_path": result.get('image_path', '')
+                }
+            
+            processed_matches.append(match)  # ✅ SIEMPRE agregar, tenga o no inventario
         
         return {
             "best_match": processed_matches[0] if processed_matches else None,
@@ -163,8 +229,26 @@ class ClassificationService:
             "alternative_matches": [],
             "total_matches_found": 0
         }
-    
-    def _format_availability(self, availability: Dict, include_transfer_options: bool) -> Dict[str, Any]:
+
+    def _extract_brand_from_model(self, model_name: str) -> str:
+        """Extraer marca del nombre del modelo"""
+        known_brands = ['Nike', 'Adidas', 'Puma', 'Reebok', 'New Balance', 'Jordan', 'Converse']
+        
+        model_lower = model_name.lower()
+        
+        for brand in known_brands:
+            if brand.lower() in model_lower:
+                return brand
+        
+        # Si no encuentra marca conocida, buscar primera palabra
+        first_word = model_name.split()[0] if model_name.split() else 'Unknown'
+        return first_word.capitalize()
+        
+    def _format_availability(
+        self, 
+        availability: Dict, 
+        include_transfer_options: bool
+    ) -> Dict[str, Any]:
         """Formatear información de disponibilidad"""
         current_stock = sum(item['quantity'] for item in availability['current_location'])
         other_stock = sum(item['quantity'] for item in availability['other_locations'])
@@ -181,20 +265,31 @@ class ClassificationService:
                 },
                 "total_system": {
                     "total_stock": current_stock + other_stock,
-                    "total_locations": len(set(item['location'] for item in availability['other_locations'])) + (1 if current_stock > 0 else 0)
+                    "total_locations": len(set(
+                        item['location'] for item in availability['other_locations']
+                    )) + (1 if current_stock > 0 else 0)
                 }
             },
-            "recommended_action": "Venta directa" if current_stock > 0 else ("Solicitar transferencia" if other_stock > 0 else "Producto no disponible"),
+            "recommended_action": (
+                "Venta directa" if current_stock > 0 
+                else ("Solicitar transferencia" if other_stock > 0 
+                      else "Producto no disponible")
+            ),
             "can_sell_now": current_stock > 0,
             "can_request_transfer": other_stock > 0 and include_transfer_options
         }
     
     def _get_product_suggestions(self, product: Dict) -> Dict[str, Any]:
         """Obtener sugerencias para el producto"""
+        similar_products = self.repository.search_similar_products(
+            product['brand'], 
+            product['model']
+        )
+        
         return {
             "can_add_to_inventory": True,
             "can_search_suppliers": False,
-            "similar_products_available": len(self.repository.search_similar_products(product['brand'], product['model'])) > 0
+            "similar_products_available": len(similar_products) > 0
         }
     
     def _calculate_availability_summary(self, results: Dict) -> Dict[str, Any]:
@@ -209,8 +304,12 @@ class ClassificationService:
                 "classification_successful": False
             }
         
-        locally_available = 1 if results['best_match']['availability']['can_sell_now'] else 0
-        transfer_available = 1 if results['best_match']['availability']['can_request_transfer'] else 0
+        # Acceso directo a diccionario (ya convertido con model_dump())
+        best_match = results['best_match']
+        availability = best_match.get('availability', {})
+        
+        locally_available = 1 if availability.get('can_sell_now', False) else 0
+        transfer_available = 1 if availability.get('can_request_transfer', False) else 0
         
         return {
             "products_available_locally": locally_available,
@@ -220,3 +319,17 @@ class ClassificationService:
             "transfer_options_available": transfer_available > 0,
             "classification_successful": True
         }
+        
+    def _extract_brand_from_model(self, model_name: str) -> str:
+        """Extraer marca del nombre del modelo"""
+        known_brands = ['Nike', 'Adidas', 'Puma', 'Reebok', 'New Balance', 'Jordan', 'Converse', 'Vans']
+        
+        model_lower = model_name.lower()
+        
+        for brand in known_brands:
+            if brand.lower() in model_lower:
+                return brand
+        
+        # Si no encuentra marca conocida, usar primera palabra
+        first_word = model_name.split()[0] if model_name.split() else 'Unknown'
+        return first_word.capitalize()
