@@ -66,28 +66,28 @@ async def accept_request(
     service = CourierService(db)
     return await service.accept_request(request_id, acceptance, current_user.id)
 
-@router.post("/confirm-pickup/{request_id}")
-async def confirm_pickup(
-    request_id: int = Path(..., description="ID de la solicitud"),
-    pickup_data: PickupConfirmation = PickupConfirmation(),
-    current_user = Depends(require_roles(["corredor", "administrador", "boss"])),
-    db: Session = Depends(get_db)
-):
-    """
-    CO003: Confirmar recolección
+# @router.post("/confirm-pickup/{request_id}")
+# async def confirm_pickup(
+#     request_id: int = Path(..., description="ID de la solicitud"),
+#     pickup_data: PickupConfirmation = PickupConfirmation(),
+#     current_user = Depends(require_roles(["corredor", "administrador", "boss"])),
+#     db: Session = Depends(get_db)
+# ):
+#     """
+#     CO003: Confirmar recolección
     
-    **Funcionalidad:**
-    - Confirmar que se recogió el producto del bodeguero
-    - Cambiar estado a 'in_transit'
-    - Registrar timestamp de recolección
-    - Iniciar tracking de entrega
+#     **Funcionalidad:**
+#     - Confirmar que se recogió el producto del bodeguero
+#     - Cambiar estado a 'in_transit'
+#     - Registrar timestamp de recolección
+#     - Iniciar tracking de entrega
     
-    **Validaciones:**
-    - Solo el corredor asignado puede confirmar
-    - Solicitud debe estar en estado 'courier_assigned'
-    """
-    service = CourierService(db)
-    return await service.confirm_pickup(request_id, pickup_data, current_user.id)
+#     **Validaciones:**
+#     - Solo el corredor asignado puede confirmar
+#     - Solicitud debe estar en estado 'courier_assigned'
+#     """
+#     service = CourierService(db)
+#     return await service.confirm_pickup(request_id, pickup_data, current_user.id)
 
 @router.post("/confirm-delivery/{request_id}")
 async def confirm_delivery(
