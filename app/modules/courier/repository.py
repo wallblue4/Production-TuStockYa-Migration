@@ -242,8 +242,14 @@ class CourierRepository:
             TransferRequest.courier_id == courier_id
         ).order_by(desc(TransferRequest.courier_accepted_at)).all()
         
-        return [
-            {
+        transport_list = []
+        for transport in transports:
+            # Consultar el producto correspondiente
+            product = self.db.query(Product).filter(
+                Product.reference_code == transport.sneaker_reference_code
+            ).first()
+
+            transport_dict = {
                 'id': transport.id,
                 'status': transport.status,
                 'sneaker_reference_code': transport.sneaker_reference_code,
@@ -251,6 +257,7 @@ class CourierRepository:
                 'model': transport.model,
                 'size': transport.size,
                 'quantity': transport.quantity,
+                'product_image': product.image_url,
                 'purpose': transport.purpose,
                 'courier_accepted_at': transport.courier_accepted_at.isoformat() if transport.courier_accepted_at else None,
                 'picked_up_at': transport.picked_up_at.isoformat() if transport.picked_up_at else None,
@@ -259,8 +266,9 @@ class CourierRepository:
                 'courier_notes': transport.courier_notes,
                 'pickup_notes': transport.pickup_notes
             }
-            for transport in transports
-        ]
+            transport_list.append(transport_dict)
+        
+        return transport_list
     
     def get_delivery_history_today(self, courier_id: int) -> List[Dict[str, Any]]:
         """CO006: Obtener historial de entregas del día"""

@@ -50,6 +50,7 @@ class ScanResponse(BaseResponse):
     scan_timestamp: datetime
     scanned_by: Dict[str, Any]
     user_location: str
+    user_location_id: Optional[int] = None
     results: ScanResults
     availability_summary: Dict[str, Any]
     processing_time_ms: float

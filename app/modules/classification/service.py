@@ -54,6 +54,7 @@ class ClassificationService:
                     "location_id": current_user.location_id
                 },
                 "user_location": f"Local #{current_user.location_id}",
+                "user_location_id": current_user.location_id,
                 "results": processed_results,
                 "availability_summary": self._calculate_availability_summary(processed_results),
                 "processing_time_ms": round(processing_time, 2),

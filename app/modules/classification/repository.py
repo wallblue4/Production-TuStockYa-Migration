@@ -2,7 +2,7 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
 from typing import List, Dict, Any, Optional
-from app.shared.database.models import Product, ProductSize, ProductMapping
+from app.shared.database.models import Product, ProductSize, ProductMapping, Location
 
 class ClassificationRepository:
     def __init__(self, db: Session):
@@ -31,16 +31,20 @@ class ClassificationRepository:
     
     def get_product_availability(self, product_id: int, user_location: str) -> Dict[str, Any]:
         """Obtener disponibilidad de producto por ubicaciones"""
-        # Stock en ubicación actual
-        current_stock = self.db.query(ProductSize).filter(
+        # Stock en ubicación actual con JOIN para obtener location_id
+        current_stock = self.db.query(ProductSize, Location.id.label('location_id')).join(
+            Location, ProductSize.location_name == Location.name
+        ).filter(
             and_(
                 ProductSize.product_id == product_id,
                 ProductSize.location_name == user_location
             )
         ).all()
         
-        # Stock en otras ubicaciones
-        other_stock = self.db.query(ProductSize).filter(
+        # Stock en otras ubicaciones con JOIN para obtener location_id
+        other_stock = self.db.query(ProductSize, Location.id.label('location_id')).join(
+            Location, ProductSize.location_name == Location.name
+        ).filter(
             and_(
                 ProductSize.product_id == product_id,
                 ProductSize.location_name != user_location,
@@ -53,17 +57,19 @@ class ClassificationRepository:
                 {
                     "size": ps.size,
                     "quantity": ps.quantity,
-                    "quantity_exhibition": ps.quantity_exhibition
+                    "quantity_exhibition": ps.quantity_exhibition,
+                    "location_id": location_id
                 }
-                for ps in current_stock
+                for ps, location_id in current_stock
             ],
             "other_locations": [
                 {
                     "location": ps.location_name,
                     "size": ps.size,
-                    "quantity": ps.quantity
+                    "quantity": ps.quantity,
+                    "location_id": location_id
                 }
-                for ps in other_stock
+                for ps, location_id in other_stock
             ]
         }
     

@@ -94,9 +94,10 @@ async def confirm_reception(
     """
     # Esta funcionalidad debe delegarse al módulo transfers
     # pero mantenemos el endpoint aquí por compatibilidad con frontend
-    from app.modules.transfers_new.service import TransferService
+    from app.shared.database.models import TransferRequest
+    from app.modules.transfers_new.service import TransfersService
     
-    transfer_service = TransferService(db)
+    transfer_service = TransfersService(db)
     return await transfer_service.confirm_reception(
         request_id, received_quantity, condition_ok, notes, current_user
     )

@@ -2,13 +2,14 @@
 from typing import Dict, Any
 from datetime import datetime
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, Query
 
 from .repository import WarehouseRepository
 from .schemas import (
     WarehouseRequestAcceptance, CourierDelivery, 
     PendingRequestsResponse, AcceptedRequestsResponse, InventoryByLocationResponse
 )
+from app.shared.database.models import TransferRequest
 
 class WarehouseService:
     def __init__(self, db: Session):

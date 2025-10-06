@@ -111,7 +111,7 @@ async def deliver_to_courier(
     3. Sistema descuenta inventario automáticamente
     4. Producto queda en tránsito hacia destino
     """
-    sservice = WarehouseService(db)
+    service = WarehouseService(db)
     
     try:
         result = await service.deliver_to_courier(delivery, current_user.id)

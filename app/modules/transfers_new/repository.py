@@ -4,10 +4,13 @@ from sqlalchemy import and_, desc, func, text
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from decimal import Decimal
+import logging
 
 from app.shared.database.models import (
     TransferRequest, User, Location, Product, ProductSize, InventoryChange
 )
+
+logger = logging.getLogger(__name__)
 
 class TransfersRepository:
     def __init__(self, db: Session):
@@ -206,13 +209,41 @@ class TransfersRepository:
         
         return summary
     
-    def confirm_reception(self, transfer_id: int, received_quantity: int, condition_ok: bool, notes: str, user_id: int) -> bool:
+    
+    def confirm_reception(
+        self, 
+        transfer_id: int, 
+        received_quantity: int, 
+        condition_ok: bool, 
+        notes: str, 
+        user_id: int
+    ) -> bool:
         """Confirmar recepción de transferencia con actualización de inventario"""
         try:
+            logger.info(f"📝 Repository: Confirmando recepción #{transfer_id}")
+            
             # Obtener transferencia
-            transfer = self.db.query(TransferRequest).filter(TransferRequest.id == transfer_id).first()
+            transfer = self.db.query(TransferRequest).filter(
+                TransferRequest.id == transfer_id
+            ).first()
+            
             if not transfer:
+                logger.warning(f"❌ Transferencia {transfer_id} no encontrada")
                 return False
+            
+            logger.info(f"✅ Transferencia encontrada: {transfer.sneaker_reference_code}")
+            
+            # ✅ OBTENER NOMBRE REAL DE UBICACIÓN DESTINO
+            destination_location = self.db.query(Location).filter(
+                Location.id == transfer.destination_location_id
+            ).first()
+            
+            if not destination_location:
+                logger.error(f"❌ Ubicación destino no encontrada: ID {transfer.destination_location_id}")
+                return False
+            
+            destination_location_name = destination_location.name
+            logger.info(f"✅ Ubicación destino: '{destination_location_name}'")
             
             # Actualizar estado de transferencia
             transfer.status = 'completed'
@@ -220,39 +251,110 @@ class TransfersRepository:
             transfer.received_quantity = received_quantity
             transfer.reception_notes = notes
             
+            logger.info(f"✅ Estado actualizado a 'completed'")
+            
             # Actualizar inventario si condición OK
             if condition_ok:
-                # Buscar producto destino
-                product_size = self.db.query(ProductSize).join(Product).filter(
+                logger.info(f"🔄 Actualizando inventario en '{destination_location_name}'")
+                
+                # Buscar producto GLOBAL (sin location_name si ya corregiste el modelo)
+                product = self.db.query(Product).filter(
+                    Product.reference_code == transfer.sneaker_reference_code
+                ).first()
+                
+                # Si no existe producto global, buscar por location (compatible con BD actual)
+                if not product:
+                    logger.info(f"   Buscando producto con location_name (BD actual)")
+                    product = self.db.query(Product).filter(
+                        and_(
+                            Product.reference_code == transfer.sneaker_reference_code,
+                            Product.location_name == destination_location_name
+                        )
+                    ).first()
+                
+                if not product:
+                    logger.warning(
+                        f"⚠️ Producto {transfer.sneaker_reference_code} no existe, "
+                        f"se creará en '{destination_location_name}'"
+                    )
+                    # Crear producto (compatible con BD actual que tiene location_name)
+                    product = Product(
+                        reference_code=transfer.sneaker_reference_code,
+                        brand=transfer.brand,
+                        model=transfer.model,
+                        description=f"{transfer.brand} {transfer.model}",
+                        location_name=destination_location_name,  # Por ahora, hasta migración
+                        unit_price=0,
+                        box_price=0,
+                        is_active=1,
+                        created_at=datetime.now()
+                    )
+                    self.db.add(product)
+                    self.db.flush()
+                    logger.info(f"✅ Producto creado: ID {product.id}")
+                
+                # Buscar product_size destino
+                product_size = self.db.query(ProductSize).filter(
                     and_(
-                        Product.reference_code == transfer.sneaker_reference_code,
+                        ProductSize.product_id == product.id,
                         ProductSize.size == transfer.size,
-                        ProductSize.location_name == f"Local #{transfer.destination_location_id}"
+                        ProductSize.location_name == destination_location_name  # ✅ NOMBRE REAL
                     )
                 ).first()
                 
+                quantity_before = 0
+                
                 if product_size:
-                    # Actualizar cantidad
+                    # CASO A: Ya existe esta talla en esta ubicación
                     quantity_before = product_size.quantity
                     product_size.quantity += received_quantity
-                    
-                    # Registrar cambio en historial
-                    inventory_change = InventoryChange(
-                        product_id=product_size.product_id,
-                        change_type='transfer_reception',
-                        size=transfer.size,
-                        quantity_before=quantity_before,
-                        quantity_after=product_size.quantity,
-                        user_id=user_id,
-                        reference_id=transfer_id,
-                        notes=f"Recepción de transferencia #{transfer_id} - {notes}"
+                    logger.info(
+                        f"✅ Stock actualizado en '{destination_location_name}': "
+                        f"{quantity_before} → {product_size.quantity}"
                     )
-                    self.db.add(inventory_change)
+                else:
+                    # CASO B: Primera vez que llega esta talla a esta ubicación
+                    product_size = ProductSize(
+                        product_id=product.id,
+                        size=transfer.size,
+                        quantity=received_quantity,
+                        quantity_exhibition=0,
+                        location_name=destination_location_name,  # ✅ NOMBRE REAL
+                        created_at=datetime.now(),
+                        updated_at=datetime.now()
+                    )
+                    self.db.add(product_size)
+                    logger.info(
+                        f"✅ Nuevo product_size creado en '{destination_location_name}': "
+                        f"qty={received_quantity}"
+                    )
+                
+                quantity_after = product_size.quantity if product_size else received_quantity
+                
+                # Registrar cambio en historial
+                inventory_change = InventoryChange(
+                    product_id=product.id,
+                    change_type='transfer_reception',
+                    size=transfer.size,
+                    quantity_before=quantity_before,
+                    quantity_after=quantity_after,
+                    user_id=user_id,
+                    reference_id=transfer_id,
+                    notes=f"Recepción de transferencia #{transfer_id} en '{destination_location_name}' - {notes}",
+                    created_at=datetime.now()
+                )
+                self.db.add(inventory_change)
+                
+                logger.info(f"✅ Cambio registrado en inventory_changes")
+            else:
+                logger.warning(f"⚠️ Condición no OK - inventario NO actualizado")
             
             self.db.commit()
+            logger.info(f"✅ Commit exitoso - Recepción completada")
+            
             return True
             
         except Exception as e:
             self.db.rollback()
-            print(f"Error confirmando recepción: {e}")
+            logger.exception(f"❌ Error en confirm_reception")
             return False

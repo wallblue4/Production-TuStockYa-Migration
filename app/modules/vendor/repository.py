@@ -4,12 +4,14 @@ from sqlalchemy import and_, func, text ,case
 from typing import List, Dict, Any
 from datetime import date, datetime
 from decimal import Decimal
-
+import logging
 
 from app.shared.database.models import (
     Sale, SalePayment, Expense, TransferRequest, DiscountRequest, 
-    ReturnNotification, User
+    ReturnNotification, User , Location, Product
 )
+
+logger = logging.getLogger(__name__)
 
 class VendorRepository:
     def __init__(self, db: Session):
@@ -162,7 +164,8 @@ class VendorRepository:
         transfers = self.db.query(TransferRequest).filter(
             and_(
                 TransferRequest.requester_id == user_id,
-                TransferRequest.status == 'delivered'
+                TransferRequest.status != 'completed',
+                TransferRequest.status != 'cancelled'
             )
         ).order_by(TransferRequest.requested_at.desc()).all()
         
@@ -174,6 +177,17 @@ class VendorRepository:
             minutes = int((time_diff.total_seconds() % 3600) // 60)
             time_elapsed = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
             
+            product_image = self._get_product_image(
+            transfer.sneaker_reference_code,
+            transfer.source_location_id
+            )
+
+            priority, next_action, action_required = self._get_transfer_status_info(
+            transfer.status, 
+            transfer.purpose,
+            hours
+            )
+
             result.append({
                 'id': transfer.id,
                 'status': transfer.status,
@@ -187,11 +201,118 @@ class VendorRepository:
                 'requested_at': transfer.requested_at.isoformat(),
                 'time_elapsed': time_elapsed,
                 'next_action': 'Confirmar recepción',
-                'courier_name': f"{transfer.courier.first_name} {transfer.courier.last_name}" if transfer.courier else None
+                'product_image': product_image,
+                'courier_name': f"{transfer.courier.first_name} {transfer.courier.last_name}" if transfer.courier else None,
+                'warehouse_keeper_name': (
+                f"{transfer.warehouse_keeper.first_name} {transfer.warehouse_keeper.last_name}"
+                if transfer.warehouse_keeper else None
+            )
             })
         
         return result
     
+
+    def _get_product_image(self, reference_code: str, source_location_id: int) -> str:
+        """
+        Obtener imagen del producto
+        Busca primero en ubicación origen, luego global, finalmente placeholder
+        """
+        try:
+            # Obtener nombre real de ubicación origen
+            source_location = self.db.query(Location).filter(
+                Location.id == source_location_id
+            ).first()
+            
+            if not source_location:
+                return self._get_placeholder_image(reference_code)
+            
+            # Buscar producto con imagen en ubicación origen
+            product = self.db.query(Product).filter(
+                and_(
+                    Product.reference_code == reference_code,
+                    Product.location_name == source_location.name
+                )
+            ).first()
+            
+            # Si no existe o no tiene imagen, buscar global
+            if not product or not product.image_url:
+                product = self.db.query(Product).filter(
+                    Product.reference_code == reference_code
+                ).first()
+            
+            # Retornar imagen o placeholder
+            if product and product.image_url:
+                return product.image_url
+            
+            return self._get_placeholder_image(reference_code)
+            
+        except Exception as e:
+            logger.exception(f"Error obteniendo imagen de producto {reference_code}")
+            return self._get_placeholder_image(reference_code)
+
+
+    def _get_placeholder_image(self, reference_code: str) -> str:
+        """Generar URL de placeholder para producto sin imagen"""
+        # Extraer marca del código de referencia
+        brand = reference_code.split('-')[0] if '-' in reference_code else 'Product'
+        return f"https://via.placeholder.com/300x200?text={brand}+{reference_code}"
+
+
+    def _get_transfer_status_info(
+        self, 
+        status: str, 
+        purpose: str, 
+        hours_elapsed: int
+    ) -> tuple:
+        """
+        Determinar prioridad y acción según estado de transferencia
+        
+        Returns:
+            tuple: (priority, next_action, action_required)
+        """
+        
+        # Prioridad base según propósito
+        base_priority = 'high' if purpose == 'cliente' else 'normal'
+        
+        # Aumentar prioridad si lleva mucho tiempo
+        if hours_elapsed >= 4:
+            priority = 'critical'
+        elif hours_elapsed >= 2 and base_priority == 'high':
+            priority = 'critical'
+        else:
+            priority = base_priority
+        
+        # Siguiente acción según estado
+        status_actions = {
+            'pending': (
+                'Esperando aceptación de bodeguero',
+                'wait'  # El vendedor no puede hacer nada aquí
+            ),
+            'accepted': (
+                'Bodeguero preparando producto',
+                'wait'
+            ),
+            'courier_assigned': (
+                'Corredor en camino a recoger',
+                'wait'
+            ),
+            'in_transit': (
+                'Producto en camino',
+                'wait'
+            ),
+            'delivered': (
+                'Confirmar recepción',
+                'confirm'  # El vendedor DEBE actuar
+            )
+        }
+        
+        next_action, action_required = status_actions.get(
+            status, 
+            ('Estado desconocido', 'check')
+        )
+        
+        return priority, next_action, action_required
+
     def get_completed_transfers_today(self, user_id: int) -> List[Dict[str, Any]]:
         """Obtener transferencias completadas del día"""
         today = date.today()
