@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, Query
 from .repository import WarehouseRepository
 from .schemas import (
     WarehouseRequestAcceptance, CourierDelivery, 
-    PendingRequestsResponse, AcceptedRequestsResponse, InventoryByLocationResponse
+    PendingRequestsResponse, AcceptedRequestsResponse, InventoryByLocationResponse ,VendorDelivery
 )
 from app.shared.database.models import TransferRequest
 
@@ -170,3 +170,73 @@ class WarehouseService:
                 "average_price": total_value / total_quantity if total_quantity > 0 else 0
             }
         )
+    
+    async def deliver_to_vendor(
+        self, 
+        transfer_id: int,
+        delivery: VendorDelivery, 
+        warehouse_keeper_id: int
+    ) -> Dict[str, Any]:
+        """
+        Entregar producto directamente al vendedor (self-pickup)
+        
+        Validaciones:
+        - Bodeguero tiene permisos para la ubicación origen
+        - Transferencia es válida y tiene pickup_type = 'vendedor'
+        - Stock disponible para entrega
+        
+        Proceso:
+        - Descuento automático de inventario
+        - Cambio de estado a 'in_transit'
+        - Registro de timestamp
+        """
+        
+        # Validar permisos del bodeguero
+        managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id)
+        location_ids = [loc['location_id'] for loc in managed_locations]
+        
+        if not location_ids:
+            raise HTTPException(
+                status_code=403, 
+                detail="No tienes ubicaciones asignadas como bodeguero"
+            )
+        
+        # Validar que la transferencia es de una ubicación gestionada
+        transfer = self.db.query(TransferRequest).filter(
+            TransferRequest.id == transfer_id
+        ).first()
+        
+        if not transfer:
+            raise HTTPException(status_code=404, detail="Transferencia no encontrada")
+        
+        if transfer.source_location_id not in location_ids:
+            raise HTTPException(
+                status_code=403, 
+                detail=f"No tienes permisos para gestionar la ubicación origen (ID: {transfer.source_location_id})"
+            )
+        
+        # Preparar datos para el repository
+        delivery_data = {
+            'delivered': delivery.delivered,
+            'delivery_notes': delivery.delivery_notes or 'Entregado al vendedor para auto-recogida'
+        }
+        
+        try:
+            # Llamar al repository que hace toda la lógica
+            result = self.repository.deliver_to_vendor(
+                transfer_id, 
+                delivery_data
+            )
+            
+            return {
+                "success": True,
+                "message": "Producto entregado al vendedor - Inventario actualizado automáticamente",
+                **result
+            }
+            
+        except ValueError as e:
+            # Re-lanzar errores de validación
+            raise HTTPException(status_code=400, detail=str(e))
+        except RuntimeError as e:
+            # Re-lanzar errores del sistema
+            raise HTTPException(status_code=500, detail=str(e))

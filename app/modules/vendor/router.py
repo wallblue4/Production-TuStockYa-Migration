@@ -1,5 +1,5 @@
 # app/modules/vendor/router.py
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query , Body , HTTPException
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
@@ -102,6 +102,46 @@ async def confirm_reception(
         request_id, received_quantity, condition_ok, notes, current_user
     )
 
+@router.get("/my-pickup-assignments")
+async def get_my_pickup_assignments(
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    db: Session = Depends(get_db)
+):
+    """
+    VE009: Ver transferencias que el vendedor debe recoger personalmente
+    
+    **Caso de uso:**
+    - Vendedor solicitó producto con pickup_type = 'vendedor'
+    - Bodeguero aceptó y preparó el producto
+    - Vendedor debe ir a bodega a recogerlo personalmente
+    - No hay corredor involucrado en el transporte
+    
+    **Funcionalidad:**
+    - Lista de productos listos para recoger
+    - Ubicación y datos de contacto de la bodega
+    - Información del bodeguero responsable
+    - Tiempo transcurrido desde que está listo
+    - Indicador de urgencia (cliente presente vs restock)
+    
+    **Estados incluidos:**
+    - `accepted`: Producto listo, esperando que vendedor vaya a recoger
+    - `in_transit`: Vendedor ya recogió, en camino a su local
+    
+    **Acciones disponibles:**
+    - Ver dirección y teléfono de bodega
+    - Contactar al bodeguero
+    - Confirmar llegada con el producto
+    """
+    service = VendorService(db)
+    
+    user_info = {
+        'first_name': current_user.first_name,
+        'last_name': current_user.last_name
+    }
+    
+    return await service.get_my_pickup_assignments(current_user.id, user_info)
+
+
 @router.get("/health")
 async def vendor_health():
     """Health check del módulo vendor"""
@@ -113,6 +153,7 @@ async def vendor_health():
             "Dashboard completo del vendedor",
             "Métricas en tiempo real",
             "Transferencias pendientes",
+            "Asignaciones de pickup personal",
             "Historial del día",
             "Confirmación de recepciones"
         ]

@@ -49,3 +49,11 @@ class RequestInfo(BaseModel):
     priority_level: str
     time_elapsed: str
     estimated_pickup_time: Optional[str] = None
+
+class VendorDelivery(BaseModel):
+    """
+    Schema para cuando el bodeguero entrega directamente al vendedor
+    (self-pickup: pickup_type = 'vendedor')
+    """
+    delivered: bool = Field(True, description="Producto entregado al vendedor")
+    delivery_notes: Optional[str] = Field(None, max_length=500, description="Notas de entrega al vendedor")

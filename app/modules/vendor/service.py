@@ -128,3 +128,27 @@ class VendorService:
                 "performance": "Buena" if success_rate >= 80 else "Regular"
             }
         )
+    
+    async def get_my_pickup_assignments(self, vendor_id: int, user_info: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Obtener asignaciones de pickup para el vendedor (self-pickup)
+        """
+        assignments = self.repository.get_vendor_pickup_assignments(vendor_id)
+        
+        # Calcular estadísticas
+        ready_to_pickup = len([a for a in assignments if a['status'] == 'accepted'])
+        in_transit = len([a for a in assignments if a['status'] == 'in_transit'])
+        
+        return {
+            "success": True,
+            "message": "Productos que debes recoger personalmente en bodega",
+            "pickup_assignments": assignments,
+            "count": len(assignments),
+            "ready_to_pickup": ready_to_pickup,
+            "in_transit": in_transit,
+            "vendor_info": {
+                "name": f"{user_info['first_name']} {user_info['last_name']}",
+                "vendor_id": vendor_id,
+                "acting_as": "recolector"
+            }
+        }

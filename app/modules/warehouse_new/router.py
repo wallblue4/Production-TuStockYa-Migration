@@ -1,6 +1,6 @@
 
 # app/modules/warehouse_new/router.py
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path , HTTPException, Body
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
@@ -8,7 +8,7 @@ from app.core.auth.dependencies import require_roles
 from .service import WarehouseService
 from .schemas import (
     WarehouseRequestAcceptance, CourierDelivery, 
-    PendingRequestsResponse, AcceptedRequestsResponse, InventoryByLocationResponse
+    PendingRequestsResponse, AcceptedRequestsResponse, InventoryByLocationResponse ,VendorDelivery
 )
 
 router = APIRouter()
@@ -142,6 +142,58 @@ async def get_inventory_by_location(
     """
     service = WarehouseService(db)
     return await service.get_inventory_by_location(location_id)
+
+@router.post("/deliver-to-vendor/{transfer_id}")
+async def deliver_to_vendor(
+    transfer_id: int = Path(..., description="ID de la transferencia", gt=0),
+    delivery: VendorDelivery = Body(...),
+    current_user = Depends(require_roles(["bodeguero", "administrador", "boss"])),
+    db: Session = Depends(get_db)
+):
+    """
+    Entregar producto directamente al vendedor (self-pickup)
+    
+    **Caso de uso:**
+    - El vendedor viene personalmente a recoger el producto
+    - No se requiere corredor para transporte
+    - pickup_type debe ser 'vendedor'
+    
+    **Funcionalidad CRÍTICA:**
+    - Entregar producto físicamente al vendedor
+    - **Descuento automático de inventario** (igual que corredor)
+    - Cambiar estado a 'in_transit'
+    - Registrar timestamp de entrega
+    - Actualizar historial de movimientos
+    
+    **Proceso:**
+    1. Vendedor llega a bodega
+    2. Bodeguero valida y entrega producto
+    3. Sistema descuenta inventario automáticamente
+    4. Vendedor debe confirmar llegada a su ubicación
+    
+    **Validaciones:**
+    - Solo transferencias con pickup_type = 'vendedor'
+    - Estado debe ser 'accepted'
+    - Bodeguero debe gestionar la ubicación origen
+    - Stock debe ser suficiente
+    
+    **Diferencia con deliver-to-courier:**
+    - NO requiere corredor intermedio
+    - Vendedor actúa como su propio transportista
+    - Flujo más corto (sin estado 'courier_assigned')
+    """
+    service = WarehouseService(db)
+    
+    try:
+        result = await service.deliver_to_vendor(transfer_id, delivery, current_user.id)
+        return result
+    except ValueError as e:
+        # Errores de validación (400 Bad Request)
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        # Errores del sistema (500 Internal Server Error)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/health")
 async def warehouse_health():

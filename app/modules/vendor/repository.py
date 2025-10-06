@@ -352,3 +352,136 @@ class VendorRepository:
             })
         
         return result
+    
+    def get_vendor_pickup_assignments(self, vendor_id: int) -> List[Dict[str, Any]]:
+        """
+        Obtener transferencias que el vendedor debe recoger personalmente
+        (pickup_type = 'vendedor')
+        
+        Estados válidos: 'accepted' (listo para recoger), 'in_transit' (en camino)
+        """
+        try:
+            from app.shared.database.models import TransferRequest, Location, User
+            from sqlalchemy import and_, or_
+            from datetime import datetime
+            
+            logger.info(f"🚶 Obteniendo asignaciones de pickup para vendedor ID: {vendor_id}")
+            
+            # Query principal
+            assignments = self.db.query(
+                TransferRequest.id,
+                TransferRequest.status,
+                TransferRequest.sneaker_reference_code,
+                TransferRequest.brand,
+                TransferRequest.model,
+                TransferRequest.size,
+                TransferRequest.quantity,
+                TransferRequest.purpose,
+                TransferRequest.requested_at,
+                TransferRequest.accepted_at,
+                TransferRequest.notes,
+                Location.name.label('source_location_name'),
+                Location.address.label('source_address'),
+                Location.phone.label('source_phone'),
+                User.first_name.label('warehouse_keeper_first_name'),
+                User.last_name.label('warehouse_keeper_last_name')
+            ).join(
+                Location, TransferRequest.source_location_id == Location.id
+            ).outerjoin(
+                User, TransferRequest.warehouse_keeper_id == User.id
+            ).filter(
+                and_(
+                    TransferRequest.courier_id == vendor_id,
+                    TransferRequest.pickup_type == 'vendedor',
+                    or_(
+                        TransferRequest.status == 'accepted',
+                        TransferRequest.status == 'in_transit'
+                    )
+                )
+            ).order_by(
+                TransferRequest.accepted_at.asc()
+            ).all()
+            
+            # Procesar resultados
+            results = []
+            for assignment in assignments:
+                warehouse_keeper = f"{assignment.warehouse_keeper_first_name or ''} {assignment.warehouse_keeper_last_name or ''}".strip()
+                
+                # Calcular tiempo transcurrido
+                time_elapsed = "Recién aceptada"
+                if assignment.accepted_at:
+                    delta = datetime.now() - assignment.accepted_at
+                    hours = delta.total_seconds() / 3600
+                    if hours < 1:
+                        time_elapsed = f"{int(delta.total_seconds() / 60)} minutos"
+                    elif hours < 24:
+                        time_elapsed = f"{int(hours)} horas"
+                    else:
+                        time_elapsed = f"{int(hours / 24)} días"
+                
+                # Determinar acción según estado
+                if assignment.status == 'accepted':
+                    action_required = "ir_a_recoger"
+                    action_description = f"Ve a {assignment.source_location_name} a recoger el producto"
+                    urgency = "high" if assignment.purpose == 'cliente' else "medium"
+                else:  # in_transit
+                    action_required = "confirmar_llegada"
+                    action_description = "Confirma que llegaste con el producto a tu local"
+                    urgency = "medium"
+                
+                # Imagen del producto
+                product_image = self._get_product_image_for_transfer(
+                    assignment.sneaker_reference_code,
+                    assignment.brand,
+                    assignment.model
+                )
+                
+                results.append({
+                    'id': assignment.id,
+                    'status': assignment.status,
+                    'sneaker_reference_code': assignment.sneaker_reference_code,
+                    'brand': assignment.brand,
+                    'model': assignment.model,
+                    'size': assignment.size,
+                    'quantity': assignment.quantity,
+                    'purpose': assignment.purpose,
+                    'source_location_name': assignment.source_location_name,
+                    'source_address': assignment.source_address or 'Dirección no disponible',
+                    'source_phone': assignment.source_phone or 'Teléfono no disponible',
+                    'warehouse_keeper_name': warehouse_keeper or 'Bodeguero',
+                    'requested_at': assignment.requested_at.isoformat() if assignment.requested_at else None,
+                    'accepted_at': assignment.accepted_at.isoformat() if assignment.accepted_at else None,
+                    'time_elapsed': time_elapsed,
+                    'action_required': action_required,
+                    'action_description': action_description,
+                    'contact_person': warehouse_keeper or 'Bodeguero',
+                    'urgency': urgency,
+                    'product_image': product_image,
+                    'notes': assignment.notes
+                })
+            
+            logger.info(f"✅ {len(results)} asignaciones de pickup encontradas")
+            return results
+            
+        except Exception as e:
+            logger.exception("❌ Error obteniendo asignaciones de pickup")
+            return []
+
+    def _get_product_image_for_transfer(self, reference_code: str, brand: str, model: str) -> str:
+        """Obtener imagen del producto para transferencia"""
+        try:
+            from app.shared.database.models import Product
+            
+            # Buscar producto con imagen
+            product = self.db.query(Product).filter(
+                Product.reference_code == reference_code
+            ).first()
+            
+            if product and product.image_url:
+                return product.image_url
+            
+            # Placeholder si no hay imagen
+            return f"https://via.placeholder.com/300x200?text={brand}+{model}"
+            
+        except Exception:
+            return f"https://via.placeholder.com/300x200?text={brand}+{model}"

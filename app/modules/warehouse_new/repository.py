@@ -763,3 +763,182 @@ class WarehouseRepository:
                 "picked_up_at": transfer.picked_up_at.isoformat()
             }
         }
+    
+    def deliver_to_vendor(
+        self, 
+        transfer_id: int, 
+        delivery_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Entregar producto directamente al vendedor (self-pickup)
+        Similar a deliver_to_courier pero sin corredor intermedio
+        
+        VALIDACIONES:
+        1. Transferencia existe y está en estado 'accepted'
+        2. pickup_type = 'vendedor' (NO corredor)
+        3. Producto existe en ubicación origen
+        4. Stock suficiente
+        5. Vendedor (courier_id) está asignado
+        
+        PROCESO:
+        1. Validar transferencia y pickup_type
+        2. Descontar inventario automáticamente
+        3. Cambiar estado a 'in_transit'
+        4. Registrar timestamp de entrega
+        5. Registrar cambio en historial de inventario
+        """
+        
+        logger.info(f"🚶 Iniciando entrega directa al vendedor - Transfer ID: {transfer_id}")
+        
+        # ==================== VALIDACIÓN 1: TRANSFERENCIA EXISTE ====================
+        transfer = self.db.query(TransferRequest).filter(
+            TransferRequest.id == transfer_id
+        ).first()
+        
+        if not transfer:
+            logger.error(f"❌ Transferencia {transfer_id} no encontrada")
+            raise ValueError(f"Transferencia #{transfer_id} no existe")
+        
+        logger.info(f"✅ Transferencia encontrada: {transfer.sneaker_reference_code}")
+        
+        # ==================== VALIDACIÓN 2: ESTADO VÁLIDO ====================
+        if transfer.status != 'accepted':
+            logger.error(f"❌ Estado inválido: {transfer.status}")
+            raise ValueError(
+                f"La transferencia debe estar en estado 'accepted'. Estado actual: {transfer.status}"
+            )
+        
+        # ==================== VALIDACIÓN 3: PICKUP_TYPE = 'VENDEDOR' ====================
+        if transfer.pickup_type != 'vendedor':
+            logger.error(f"❌ pickup_type incorrecto: {transfer.pickup_type}")
+            raise ValueError(
+                f"Esta transferencia requiere corredor (pickup_type: {transfer.pickup_type}). "
+                f"Use /deliver-to-courier para entregas con corredor."
+            )
+        
+        logger.info(f"✅ Validación pickup_type correcta: vendedor")
+        
+    
+        # ==================== OBTENER UBICACIÓN ORIGEN ====================
+        source_location = self.db.query(Location).filter(
+            Location.id == transfer.source_location_id
+        ).first()
+        
+        if not source_location:
+            logger.error(f"❌ Ubicación origen no encontrada: {transfer.source_location_id}")
+            raise ValueError(f"Ubicación origen (ID: {transfer.source_location_id}) no existe")
+        
+        source_location_name = source_location.name
+        logger.info(f"✅ Ubicación origen: {source_location_name}")
+        
+        # ==================== VALIDACIÓN 5: PRODUCTO EXISTE ====================
+        product_size = self.db.query(ProductSize).join(Product).filter(
+            and_(
+                Product.reference_code == transfer.sneaker_reference_code,
+                ProductSize.size == transfer.size,
+                ProductSize.location_name == source_location_name
+            )
+        ).first()
+        
+        if not product_size:
+            logger.error(f"❌ Producto no encontrado en inventario")
+            raise ValueError(
+                f"Producto {transfer.sneaker_reference_code} talla {transfer.size} "
+                f"no encontrado en {source_location_name}"
+            )
+        
+        logger.info(f"✅ Producto encontrado - Stock actual: {product_size.quantity}")
+        
+        # ==================== VALIDACIÓN 6: STOCK SUFICIENTE ====================
+        if product_size.quantity < transfer.quantity:
+            logger.error(
+                f"❌ Stock insuficiente: "
+                f"Requerido: {transfer.quantity}, Disponible: {product_size.quantity}"
+            )
+            raise ValueError(
+                f"Stock insuficiente. Disponible: {product_size.quantity}, "
+                f"Requerido: {transfer.quantity}"
+            )
+        
+        logger.info(f"✅ Stock suficiente para transferir {transfer.quantity} unidades")
+        
+        # ==================== DESCUENTO AUTOMÁTICO DE INVENTARIO ====================
+        quantity_before = product_size.quantity
+        product_size.quantity -= transfer.quantity
+        quantity_after = product_size.quantity
+        
+        logger.info(
+            f"📦 Inventario actualizado: {quantity_before} → {quantity_after} "
+            f"(-{transfer.quantity})"
+        )
+        
+        # ==================== ACTUALIZAR TRANSFERENCIA ====================
+        transfer.status = 'in_transit'
+        transfer.picked_up_at = datetime.now()
+        transfer.pickup_notes = delivery_data.get('delivery_notes', 'Entregado al vendedor para auto-recogida')
+        
+        logger.info(f"✅ Estado actualizado: accepted → in_transit")
+        logger.info(f"✅ Timestamp registrado: {transfer.picked_up_at}")
+        
+        # ==================== REGISTRAR EN HISTORIAL ====================
+        inventory_change = InventoryChange(
+            product_id=product_size.product_id,
+            change_type='vendor_pickup',  # Tipo específico para self-pickup
+            size=transfer.size,
+            quantity_before=quantity_before,
+            quantity_after=quantity_after,
+            user_id=transfer.warehouse_keeper_id,
+            reference_id=transfer.id,
+            notes=(
+                f"Entrega directa a vendedor (ID: {transfer.courier_id}) - "
+                f"Transferencia #{transfer.id} - "
+                f"{delivery_data.get('delivery_notes', 'Self-pickup confirmado')}"
+            ),
+            created_at=datetime.now()
+        )
+        self.db.add(inventory_change)
+        
+        # ==================== COMMIT ====================
+        try:
+            self.db.commit()
+            logger.info(f"✅ Transacción completada exitosamente")
+            
+        except SQLAlchemyError as e:
+            logger.error(f"❌ Error en commit: {e}")
+            self.db.rollback()
+            raise RuntimeError(
+                f"Error guardando cambios en la base de datos: {str(e)}"
+            )
+        
+        # ==================== RETORNAR RESULTADO DETALLADO ====================
+        return {
+            "success": True,
+            "transfer_id": transfer.id,
+            "status": transfer.status,
+            "pickup_type": "vendedor",
+            "picked_up_at": transfer.picked_up_at.isoformat(),
+            "inventory_updated": True,
+            "inventory_change": {
+                "product_reference": transfer.sneaker_reference_code,
+                "product_name": f"{transfer.brand} {transfer.model}",
+                "size": transfer.size,
+                "quantity_transferred": transfer.quantity,
+                "quantity_before": quantity_before,
+                "quantity_after": quantity_after,
+                "location": source_location_name
+            },
+            "vendor_info": {
+                "vendor_id": transfer.courier_id,  # En self-pickup, courier_id es el vendedor
+                "notes": transfer.pickup_notes,
+                "pickup_method": "self_pickup"
+            },
+            "timestamps": {
+                "requested_at": transfer.requested_at.isoformat(),
+                "accepted_at": transfer.accepted_at.isoformat() if transfer.accepted_at else None,
+                "picked_up_at": transfer.picked_up_at.isoformat()
+            },
+            "next_steps": [
+                "Vendedor debe confirmar llegada a su ubicación",
+                "Inventario se incrementará automáticamente en destino al confirmar"
+            ]
+        }

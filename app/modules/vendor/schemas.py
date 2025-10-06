@@ -44,3 +44,36 @@ class PendingActions(BaseModel):
     transfer_requests: Dict[str, int]
     discount_requests: Dict[str, int]
     return_notifications: int
+
+# Agregar al final de app/modules/vendor/schemas.py
+
+class PickupAssignmentInfo(BaseModel):
+    """Información de una asignación de pickup para el vendedor"""
+    id: int
+    status: str
+    sneaker_reference_code: str
+    brand: str
+    model: str
+    size: str
+    quantity: int
+    purpose: str
+    source_location_name: str
+    source_address: Optional[str]
+    source_phone: Optional[str]
+    warehouse_keeper_name: str
+    requested_at: str
+    accepted_at: Optional[str]
+    time_elapsed: str
+    action_required: str
+    action_description: str
+    contact_person: str
+    urgency: str
+    product_image: Optional[str]
+
+class MyPickupAssignmentsResponse(BaseResponse):
+    """Respuesta con asignaciones de pickup del vendedor"""
+    pickup_assignments: List[PickupAssignmentInfo]
+    count: int
+    ready_to_pickup: int
+    in_transit: int
+    vendor_info: Dict[str, Any]
