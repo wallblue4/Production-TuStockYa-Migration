@@ -358,3 +358,110 @@ class TransfersRepository:
             self.db.rollback()
             logger.exception(f"❌ Error en confirm_reception")
             return False
+
+    # AGREGAR AL FINAL DE app/modules/transfers_new/repository.py
+
+    def get_returns_by_vendor(self, vendor_id: int) -> List[Dict[str, Any]]:
+        """Obtener devoluciones del vendedor"""
+        try:
+            returns = self.db.query(TransferRequest).filter(
+                and_(
+                    TransferRequest.requester_id == vendor_id,
+                    TransferRequest.request_type == 'return',
+                    TransferRequest.original_transfer_id.isnot(None)
+                )
+            ).order_by(desc(TransferRequest.requested_at)).all()
+            
+            result = []
+            for ret in returns:
+                # Tiempo transcurrido
+                time_diff = datetime.now() - ret.requested_at
+                hours = int(time_diff.total_seconds() // 3600)
+                minutes = int((time_diff.total_seconds() % 3600) // 60)
+                time_elapsed = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+                
+                # Información de estado
+                status_info = self._get_return_status_info(ret.status)
+                pickup_method_display = "🚚 Corredor" if ret.pickup_type == 'corredor' else "🚶 Tú mismo"
+                
+                result.append({
+                    'id': ret.id,
+                    'return_type': 'return',
+                    'original_transfer_id': ret.original_transfer_id,
+                    'status': ret.status,
+                    'status_info': status_info,
+                    'sneaker_reference_code': ret.sneaker_reference_code,
+                    'brand': ret.brand,
+                    'model': ret.model,
+                    'size': ret.size,
+                    'quantity': ret.quantity,
+                    'reason': self._extract_reason_from_notes(ret.notes),
+                    'requested_at': ret.requested_at.isoformat(),
+                    'time_elapsed': time_elapsed,
+                    'pickup_type': ret.pickup_type,
+                    'source_location': ret.source_location.name if ret.source_location else None,
+                    'destination_location': ret.destination_location.name if ret.destination_location else None,
+                    'courier_name': f"{ret.courier.first_name} {ret.courier.last_name}" if ret.courier else None,
+                    'notes': ret.notes
+                })
+            
+            return result
+            
+        except Exception as e:
+            logger.exception("Error obteniendo returns")
+            return []
+    
+    def _get_return_status_info(self, status: str) -> Dict[str, Any]:
+        """Info de estado específica para returns"""
+        status_map = {
+            'pending': {
+                'title': 'Devolución Pendiente',
+                'description': 'Esperando que bodeguero acepte la devolución',
+                'progress': 10
+            },
+            'accepted': {
+                'title': 'Devolución Aceptada',
+                'description': 'Bodega aceptó la devolución, esperando corredor',
+                'progress': 30
+            },
+            'courier_assigned': {
+                'title': 'Corredor Asignado',
+                'description': 'Corredor en camino a recoger el producto',
+                'progress': 50
+            },
+            'in_transit': {
+                'title': 'En Tránsito a Bodega',
+                'description': 'Corredor transportando producto de regreso',
+                'progress': 70
+            },
+            'delivered': {
+                'title': 'Entregado en Bodega',
+                'description': 'Esperando confirmación de bodeguero',
+                'progress': 90
+            },
+            'completed': {
+                'title': 'Devolución Completada',
+                'description': 'Inventario restaurado en bodega',
+                'progress': 100
+            }
+        }
+        
+        return status_map.get(status, {
+            'title': 'Estado Desconocido',
+            'description': status,
+            'progress': 0
+        })
+    
+    def _extract_reason_from_notes(self, notes: Optional[str]) -> str:
+        """Extraer razón de las notas"""
+        if not notes:
+            return "No especificado"
+        
+        # Buscar "Razón: X" en las notas
+        if "Razón:" in notes:
+            lines = notes.split('\n')
+            for line in lines:
+                if line.startswith("Razón:"):
+                    return line.replace("Razón:", "").strip()
+        
+        return "No especificado"    

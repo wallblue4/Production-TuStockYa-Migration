@@ -41,9 +41,7 @@ class CourierRepository:
             JOIN users r ON tr.requester_id = r.id
             LEFT JOIN products p ON tr.sneaker_reference_code = p.reference_code
             WHERE tr.pickup_type = 'corredor'
-                AND ((tr.status = 'accepted' AND tr.courier_id IS NULL) 
-                     OR tr.courier_id = :courier_id)
-                AND tr.status IN ('accepted', 'courier_assigned', 'in_transit')
+                AND tr.status = 'accepted'
             ORDER BY 
                 CASE WHEN tr.purpose = 'cliente' THEN 1 ELSE 2 END,
                 CASE WHEN tr.courier_id = :courier_id THEN 1 ELSE 2 END,
@@ -239,7 +237,8 @@ class CourierRepository:
     def get_my_transports(self, courier_id: int) -> List[Dict[str, Any]]:
         """Obtener transportes asignados al corredor"""
         transports = self.db.query(TransferRequest).filter(
-            TransferRequest.courier_id == courier_id
+            TransferRequest.courier_id == courier_id,
+            TransferRequest.status.in_(['courier_assigned', 'in_transit', 'delivered'])
         ).order_by(desc(TransferRequest.courier_accepted_at)).all()
         
         transport_list = []
@@ -264,7 +263,21 @@ class CourierRepository:
                 'delivered_at': transport.delivered_at.isoformat() if transport.delivered_at else None,
                 'estimated_pickup_time': transport.estimated_pickup_time,
                 'courier_notes': transport.courier_notes,
-                'pickup_notes': transport.pickup_notes
+                'pickup_notes': transport.pickup_notes,
+                'source_location': {
+                    'id': transport.source_location.id,
+                    'name': transport.source_location.name,
+                    'type': transport.source_location.type,
+                    'address': transport.source_location.address,
+                    'phone': transport.source_location.phone
+                } if transport.source_location else None,
+                'destination_location': {
+                    'id': transport.destination_location.id,
+                    'name': transport.destination_location.name,
+                    'type': transport.destination_location.type,
+                    'address': transport.destination_location.address,
+                    'phone': transport.destination_location.phone
+                } if transport.destination_location else None
             }
             transport_list.append(transport_dict)
         

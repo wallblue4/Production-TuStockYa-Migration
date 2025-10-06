@@ -200,6 +200,7 @@ class VendorRepository:
                 'priority': 'high' if transfer.purpose == 'cliente' else 'normal',
                 'requested_at': transfer.requested_at.isoformat(),
                 'time_elapsed': time_elapsed,
+                "pickup_type": transfer.pickup_type,
                 'next_action': 'Confirmar recepción',
                 'product_image': product_image,
                 'courier_name': f"{transfer.courier.first_name} {transfer.courier.last_name}" if transfer.courier else None,
@@ -485,3 +486,125 @@ class VendorRepository:
             
         except Exception:
             return f"https://via.placeholder.com/300x200?text={brand}+{model}"
+
+    # app/modules/vendor/repository.py
+
+    def deliver_return_to_warehouse(
+        self,
+        return_id: int,
+        delivery_notes: str,
+        vendor_id: int
+    ) -> Dict[str, Any]:
+        """
+        Vendedor confirma que entregó return personalmente en bodega
+        
+        IMPORTANTE: Este paso NO actualiza inventario
+        Solo confirma que el vendedor llevó el producto
+        El bodeguero debe validar y restaurar inventario (BG010)
+        """
+        
+        try:
+            logger.info(f"🚶 Procesando entrega de vendedor - Return #{return_id}")
+            
+            # ==================== VALIDACIÓN 1: OBTENER RETURN ====================
+            return_transfer = self.db.query(TransferRequest).filter(
+                TransferRequest.id == return_id
+            ).first()
+            
+            if not return_transfer:
+                raise ValueError(f"Return #{return_id} no encontrado")
+            
+            logger.info(f"✅ Return encontrado: {return_transfer.sneaker_reference_code}")
+            
+            # ==================== VALIDACIÓN 2: ES UN RETURN ====================
+            if not return_transfer.original_transfer_id:
+                raise ValueError("Esta transferencia no es una devolución")
+            
+            # ==================== VALIDACIÓN 3: ES EL VENDEDOR SOLICITANTE ====================
+            if return_transfer.requester_id != vendor_id:
+                raise ValueError("Solo el vendedor solicitante puede confirmar entrega")
+            
+            # ==================== VALIDACIÓN 4: PICKUP_TYPE = 'VENDEDOR' ====================
+            if return_transfer.pickup_type != 'vendedor':
+                raise ValueError(
+                    f"Este return usa corredor (pickup_type: {return_transfer.pickup_type}). "
+                    f"No puedes confirmar entrega personal."
+                )
+            
+            logger.info(f"✅ Return con pickup_type = 'vendedor' confirmado")
+            
+            # ==================== VALIDACIÓN 5: ESTADO ====================
+            if return_transfer.status != 'accepted':
+                raise ValueError(
+                    f"Return debe estar en estado 'accepted' (bodeguero ya aceptó). "
+                    f"Estado actual: '{return_transfer.status}'"
+                )
+            
+            logger.info(f"✅ Todas las validaciones pasaron")
+            
+            # ==================== OBTENER UBICACIÓN DESTINO ====================
+            destination_location = self.db.query(Location).filter(
+                Location.id == return_transfer.destination_location_id
+            ).first()
+            
+            destination_location_name = destination_location.name if destination_location else "Bodega"
+            
+            # ==================== ACTUALIZAR RETURN A 'DELIVERED' ====================
+            logger.info(f"📝 Actualizando return a estado 'delivered'")
+            
+            return_transfer.status = 'delivered'
+            return_transfer.delivered_at = datetime.now()
+            
+            # Agregar notas de entrega del vendedor
+            delivery_notes_text = (
+                f"\n\n═══ ENTREGA PERSONAL VENDEDOR ═══\n"
+                f"Vendedor ID: {vendor_id}\n"
+                f"Fecha entrega: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Notas: {delivery_notes or 'Sin notas adicionales'}\n"
+                f"Estado: Producto entregado en bodega\n"
+                f"Pendiente: Validación por bodeguero\n"
+                f"═══════════════════════════════════"
+            )
+            
+            return_transfer.notes = (return_transfer.notes or '') + delivery_notes_text
+            
+            # ==================== COMMIT ====================
+            self.db.commit()
+            
+            logger.info(f"✅ Entrega de vendedor confirmada - Estado: delivered")
+            
+            # ==================== RESPUESTA ====================
+            return {
+                "return_id": return_id,
+                "original_transfer_id": return_transfer.original_transfer_id,
+                "status": "delivered",
+                "delivered_at": return_transfer.delivered_at.isoformat(),
+                "pickup_type": "vendedor",
+                "warehouse_location": destination_location_name,
+                "product_info": {
+                    "reference_code": return_transfer.sneaker_reference_code,
+                    "brand": return_transfer.brand,
+                    "model": return_transfer.model,
+                    "size": return_transfer.size,
+                    "quantity": return_transfer.quantity
+                },
+                "vendor_info": {
+                    "vendor_id": vendor_id,
+                    "delivery_notes": delivery_notes
+                },
+                "next_step": "Bodeguero debe confirmar recepción y restaurar inventario (BG010)",
+                "pending_action": {
+                    "who": "Bodeguero",
+                    "what": "Verificar producto y confirmar recepción",
+                    "endpoint": f"POST /warehouse/confirm-return-reception/{return_id}"
+                }
+            }
+            
+        except ValueError as e:
+            logger.error(f"❌ Error validación: {e}")
+            self.db.rollback()
+            raise
+        except Exception as e:
+            logger.exception("❌ Error confirmando entrega vendedor")
+            self.db.rollback()
+            raise RuntimeError(f"Error procesando entrega: {str(e)}")

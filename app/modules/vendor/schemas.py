@@ -77,3 +77,7 @@ class MyPickupAssignmentsResponse(BaseResponse):
     ready_to_pickup: int
     in_transit: int
     vendor_info: Dict[str, Any]
+
+class DeliveryNotes(BaseModel):
+    # La variable se llama 'delivery_notes' y es de tipo str.
+    delivery_notes: str = Field(..., description="Notas de entrega")

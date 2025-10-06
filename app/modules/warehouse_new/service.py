@@ -3,6 +3,7 @@ from typing import Dict, Any
 from datetime import datetime
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, Query
+import logging
 
 from .repository import WarehouseRepository
 from .schemas import (
@@ -10,6 +11,10 @@ from .schemas import (
     PendingRequestsResponse, AcceptedRequestsResponse, InventoryByLocationResponse ,VendorDelivery
 )
 from app.shared.database.models import TransferRequest
+
+from app.modules.transfers_new.schemas import ReturnReceptionConfirmation
+
+logger = logging.getLogger(__name__)
 
 class WarehouseService:
     def __init__(self, db: Session):
@@ -240,3 +245,58 @@ class WarehouseService:
         except RuntimeError as e:
             # Re-lanzar errores del sistema
             raise HTTPException(status_code=500, detail=str(e))
+
+    # AGREGAR AL FINAL DE app/modules/warehouse_new/service.py
+
+    async def confirm_return_reception(
+        self,
+        return_id: int,
+        reception: ReturnReceptionConfirmation,
+        warehouse_keeper_id: int
+    ) -> Dict[str, Any]:
+        """
+        BG010: Confirmar recepción de devolución con RESTAURACIÓN de inventario
+        
+        Proceso:
+        1. Validar que es un return (original_transfer_id != NULL)
+        2. Validar permisos del bodeguero
+        3. Verificar condición del producto
+        4. SUMAR inventario en bodega (reversión)
+        5. Marcar como completado
+        6. Registrar en historial
+        """
+        
+        try:
+            logger.info(f"📦 Confirmando recepción de return #{return_id}")
+            
+            # Validar permisos
+            managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id)
+            location_ids = [loc['location_id'] for loc in managed_locations]
+            
+            if not location_ids:
+                raise HTTPException(403, detail="No tienes ubicaciones asignadas")
+            
+            # Llamar al repository
+            result = self.repository.confirm_return_reception(
+                return_id,
+                reception.dict(),
+                warehouse_keeper_id,
+                location_ids
+            )
+            
+            return {
+                "success": True,
+                "message": "Devolución recibida - Inventario restaurado automáticamente",
+                "return_id": result["return_id"],
+                "original_transfer_id": result["original_transfer_id"],
+                "received_quantity": result["received_quantity"],
+                "product_condition": result["product_condition"],
+                "inventory_restored": result["inventory_restored"],
+                "warehouse_location": result["warehouse_location"],
+                "inventory_change": result["inventory_change"]
+            }
+            
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(500, detail=str(e))

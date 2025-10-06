@@ -2,9 +2,12 @@
 from typing import Dict, Any
 from datetime import datetime
 from sqlalchemy.orm import Session
+import logging
 
 from .repository import VendorRepository
 from .schemas import VendorDashboardResponse, TransferSummaryResponse, CompletedTransfersResponse
+
+logger = logging.getLogger(__name__)
 
 class VendorService:
     def __init__(self, db: Session):
@@ -152,3 +155,27 @@ class VendorService:
                 "acting_as": "recolector"
             }
         }
+
+    async def deliver_return_to_warehouse(
+        self,
+        return_id: int,
+        delivery_notes: str,
+        vendor_id: int
+    ) -> Dict[str, Any]:
+        """Confirmar que vendedor entregó return en bodega"""
+        
+        try:
+            logger.info(f"🚶 Vendedor confirma entrega - Return #{return_id}")
+            
+            result = self.repository.deliver_return_to_warehouse(
+                return_id,
+                delivery_notes,
+                vendor_id
+            )
+            
+            return result
+            
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(500, detail=str(e))

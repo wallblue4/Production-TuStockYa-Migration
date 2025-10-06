@@ -37,3 +37,106 @@ class ReceptionConfirmation(BaseModel):
     received_quantity: int = Field(..., gt=0, description="Cantidad recibida")
     condition_ok: bool = Field(..., description="Condición del producto OK")
     notes: str = Field("", description="Notas de recepción")
+
+class ReturnRequestCreate(BaseModel):
+    """Schema para crear solicitud de devolución"""
+    original_transfer_id: int = Field(..., description="ID de la transferencia original")
+    reason: str = Field(..., description="Motivo: no_sale, defect, wrong_product, customer_rejection")
+    quantity_to_return: int = Field(..., gt=0, description="Cantidad a devolver")
+    pickup_type: str = Field(
+        "corredor",
+        description="Método de devolución: 'corredor' (corredor recoge) o 'vendedor' (llevas tú mismo)"
+    )
+    product_condition: str = Field("good", description="Estado: good, damaged, unusable")
+    notes: Optional[str] = Field(None, max_length=500)
+    
+    @validator('reason')
+    def validate_reason(cls, v):
+        allowed = ['no_sale', 'defect', 'wrong_product', 'customer_rejection', 'overstock']
+        if v not in allowed:
+            raise ValueError(f'Razón debe ser una de: {allowed}')
+        return v
+    
+    @validator('product_condition')
+    def validate_condition(cls, v):
+        allowed = ['good', 'damaged', 'unusable']
+        if v not in allowed:
+            raise ValueError(f'Condición debe ser una de: {allowed}')
+        return v
+
+    @validator('pickup_type')
+    def validate_pickup_type(cls, v):
+        allowed_types = ['corredor', 'vendedor']
+        if v not in allowed_types:
+            raise ValueError(f'pickup_type debe ser: {allowed_types}')
+        return v
+
+        class Config:
+            json_schema_extra = {
+                "example": {
+                    "original_transfer_id": 123,
+                    "reason": "no_sale",
+                    "quantity_to_return": 1,
+                    "product_condition": "good",
+                    "pickup_type": "vendedor",
+                    "notes": "Cliente no lo compró, lo llevaré yo mismo a bodega"
+                }
+            }
+
+
+class ReturnRequestResponse(BaseResponse):
+    """Respuesta al crear devolución"""
+    return_id: int
+    original_transfer_id: int
+    status: str
+    pickup_type: str
+    estimated_return_time: str
+    workflow_steps: List[str]
+    priority: str = "normal"
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Devolución creada - Llevarás el producto tú mismo",
+                "return_id": 456,
+                "original_transfer_id": 123,
+                "status": "pending",
+                "pickup_type": "vendedor",
+                "estimated_return_time": "1-2 horas",
+                "workflow_steps": [
+                    "Bodeguero aceptará la solicitud",
+                    "Llevarás el producto a bodega personalmente",
+                    "Bodeguero confirmará recepción",
+                    "Inventario se restaurará"
+                ],
+                "return_type": "return",
+                "priority": "normal",
+                "next_action": "Esperar aceptación de bodeguero"
+            }
+        }
+
+class ReturnReceptionConfirmation(BaseModel):
+    """Confirmación de recepción por bodeguero"""
+    received_quantity: int = Field(..., gt=0)
+    product_condition: str = Field(...)
+    return_to_inventory: bool = Field(True)
+    quality_check_passed: bool = Field(True)
+    notes: Optional[str] = Field(None, max_length=500)
+    
+    @validator('product_condition')
+    def validate_condition(cls, v):
+        allowed = ['good', 'damaged', 'unusable']
+        if v not in allowed:
+            raise ValueError(f'Condición debe ser: {allowed}')
+        return v
+
+class ReturnReceptionResponse(BaseResponse):
+    """Respuesta al confirmar recepción de return"""
+    return_id: int
+    original_transfer_id: int
+    received_quantity: int
+    product_condition: str
+    inventory_restored: bool
+    warehouse_location: str
+    inventory_change: Dict[str, Any]

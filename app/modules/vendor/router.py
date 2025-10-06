@@ -1,11 +1,11 @@
 # app/modules/vendor/router.py
-from fastapi import APIRouter, Depends, Query , Body , HTTPException
+from fastapi import APIRouter, Depends, Query , Body , HTTPException , Path
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
 from app.core.auth.dependencies import require_roles
 from .service import VendorService
-from .schemas import VendorDashboardResponse, TransferSummaryResponse, CompletedTransfersResponse
+from .schemas import VendorDashboardResponse, TransferSummaryResponse, CompletedTransfersResponse , DeliveryNotes
 
 router = APIRouter()
 
@@ -140,6 +140,82 @@ async def get_my_pickup_assignments(
     }
     
     return await service.get_my_pickup_assignments(current_user.id, user_info)
+
+
+
+@router.post("/deliver-return-to-warehouse/{return_id}")
+async def deliver_return_to_warehouse(
+    request_body: DeliveryNotes,
+    return_id: int = Path(..., description="ID del return", gt=0), 
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    db: Session = Depends(get_db)
+):
+    """
+    Confirmar que llevé el producto de devolución a bodega personalmente
+    
+    **Caso de uso:**
+    - Return con pickup_type = 'vendedor'
+    - Estado = 'accepted' (bodeguero ya aceptó)
+    - YO llevé el producto físicamente a bodega
+    - Bodeguero debe confirmar que lo recibió
+    
+    **Proceso:**
+    1. Validar que es MI return con pickup_type = 'vendedor'
+    2. Validar estado = 'accepted'
+    3. Cambiar estado a 'delivered'
+    4. Registrar timestamp de entrega
+    5. Esperar confirmación del bodeguero (BG010)
+    
+    **Validaciones:**
+    - Solo el vendedor solicitante puede confirmar
+    - Return debe estar en estado 'accepted'
+    - pickup_type debe ser 'vendedor'
+    - No se puede confirmar dos veces
+    
+    **Siguiente paso:**
+    - Bodeguero hará control de calidad
+    - Bodeguero confirmará recepción (BG010)
+    - Ahí se restaura el inventario
+    
+    **Request:**
+    ```json
+        {
+        "delivery_notes": "Entregué el producto en bodega - 15:30 hrs"
+        }
+        **Response:**
+    {
+    "success": true,
+    "message": "Entrega confirmada - Esperando que bodeguero valide recepción",
+    "return_id": 135,
+    "status": "delivered",
+    "delivered_at": "2025-10-06T15:30:00",
+    "next_step": "Bodeguero debe confirmar recepción y restaurar inventario"
+    }
+    """
+    # Inicialización del servicio de negocio
+    service = VendorService(db)
+
+    try:
+        # Llamada a la lógica del servicio
+        result = await service.deliver_return_to_warehouse(
+            return_id,
+            request_body.delivery_notes,
+            current_user.id
+        )
+        
+        # Retorno de la respuesta exitosa
+        return {
+            "success": True,
+            "message": "Entrega confirmada - Esperando que bodeguero valide recepción",
+            **result # Desempaqueta los resultados del servicio (e.g., status, delivered_at)
+        }
+        
+    except ValueError as e:
+        # Manejo de errores de negocio o validación (código HTTP 400 Bad Request)
+        raise HTTPException(400, detail=str(e))
+    except RuntimeError as e:
+        # Manejo de errores internos del servidor (código HTTP 500 Internal Server Error)
+        raise HTTPException(500, detail=str(e))
 
 
 @router.get("/health")

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.config.database import get_db
 from app.core.auth.dependencies import require_roles
 from .service import TransfersService
-from .schemas import TransferRequestCreate, TransferRequestResponse, MyTransferRequestsResponse
+from .schemas import TransferRequestCreate, TransferRequestResponse, MyTransferRequestsResponse , ReturnRequestCreate, ReturnRequestResponse
 
 router = APIRouter()
 
@@ -54,6 +54,71 @@ async def get_my_transfer_requests(
     }
     
     return await service.get_my_transfer_requests(current_user.id, user_info)
+
+
+@router.post("/create-return", response_model=ReturnRequestResponse)
+async def create_return_request(
+    return_data: ReturnRequestCreate,
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    db: Session = Depends(get_db)
+):
+    """
+    VE006: Crear solicitud de devolución de producto
+    
+    **Caso de uso:**
+    - Producto transferido que NO se vendió
+    - Cliente rechazó el producto
+    - Producto con defecto detectado
+    - Sobrecupo en exhibición
+    
+    **Proceso:**
+    1. Valida transferencia original existe y completada
+    2. Crea nueva transferencia con ruta INVERTIDA (local → bodega)
+    3. Marca como tipo 'return'
+    4. Sigue el MISMO FLUJO que transferencia normal:
+       - BG001-BG002: Bodeguero acepta
+       - CO001-CO004: Corredor transporta
+       - BG010: Bodeguero confirma recepción
+    5. Al finalizar: RESTAURA inventario en bodega
+    
+    **Validaciones:**
+    - Solo el solicitante original puede devolver
+    - Transfer debe estar completado
+    - Cantidad no puede exceder lo recibido
+    - No se puede devolver dos veces
+    
+    **Diferencia con transfer normal:**
+    - Origen y destino están INVERTIDOS
+    - Prioridad siempre 'normal' (no urgente)
+    - Al confirmar recepción: SUMA inventario (no resta)
+    """
+    service = TransfersService(db)
+    return await service.create_return_request(return_data, current_user.id)
+
+@router.get("/my-returns")
+async def get_my_returns(
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    db: Session = Depends(get_db)
+):
+    """
+    Obtener mis devoluciones activas
+    
+    **Incluye:**
+    - Devoluciones en todos los estados
+    - Información del transfer original
+    - Estado actual y progreso
+    - Tiempo transcurrido
+    - Razón de devolución
+    """
+    service = TransfersService(db)
+    
+    user_info = {
+        'first_name': current_user.first_name,
+        'last_name': current_user.last_name
+    }
+    
+    return await service.get_my_returns(current_user.id, user_info)
+
 
 @router.get("/health")
 async def transfers_health():

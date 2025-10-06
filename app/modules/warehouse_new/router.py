@@ -8,7 +8,10 @@ from app.core.auth.dependencies import require_roles
 from .service import WarehouseService
 from .schemas import (
     WarehouseRequestAcceptance, CourierDelivery, 
-    PendingRequestsResponse, AcceptedRequestsResponse, InventoryByLocationResponse ,VendorDelivery
+    PendingRequestsResponse, AcceptedRequestsResponse, InventoryByLocationResponse ,VendorDelivery ,
+)
+from app.modules.transfers_new.schemas import (
+    ReturnReceptionConfirmation, ReturnReceptionResponse
 )
 
 router = APIRouter()
@@ -194,6 +197,79 @@ async def deliver_to_vendor(
         # Errores del sistema (500 Internal Server Error)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+# app/modules/warehouse_new/router.py
+
+@router.post("/confirm-return-reception/{return_id}", response_model=ReturnReceptionResponse)
+async def confirm_return_reception(
+    return_id: int = Path(..., description="ID de la devolución", gt=0),
+    reception: ReturnReceptionConfirmation = Body(...),
+    current_user = Depends(require_roles(["bodeguero", "administrador", "boss"])),
+    db: Session = Depends(get_db)
+):
+    """
+    BG010: Confirmar recepción de devolución con RESTAURACIÓN de inventario
+    
+    **Caso de uso:**
+    - Corredor entregó producto devuelto en bodega
+    - Bodeguero inspecciona producto
+    - Verifica condición y calidad
+    - Decide si regresa a inventario vendible
+    
+    **Proceso CRÍTICO:**
+    1. Validar que es una devolución (return)
+    2. Verificar condición del producto:
+       - `good`: Regresa a inventario normal → SUMA cantidad
+       - `damaged`: Marca para reparación → SUMA con nota de daño
+       - `unusable`: Descarta → NO suma a inventario
+    3. RESTAURAR inventario en bodega (reversión del descuento original)
+    4. Marcar return como completado
+    5. Registrar en historial de movimientos
+    
+    **Diferencia CLAVE con transferencia normal:**
+    - Transfer normal: VE008 confirma recepción → SUMA en destino
+    - Return: BG010 confirma recepción → RESTAURA (SUMA) en bodega origen
+    
+    **Control de calidad:**
+    - `quality_check_passed=True`: Producto apto para venta
+    - `quality_check_passed=False`: Requiere revisión adicional
+    
+    **Validaciones:**
+    - Solo bodegueros de la ubicación destino (bodega origen original)
+    - Return debe estar en estado 'delivered'
+    - Cantidad no puede exceder lo devuelto
+    - Solo se puede confirmar una vez
+    
+    **Inventario según condición:**
+    good + quality_check_passed=True → Inventario normal
+    damaged + quality_check_passed=True → Inventario con nota de daño
+    unusable → NO regresa a inventario (pérdida registrada)
+    """
+    service = WarehouseService(db)
+    
+    try:
+        # ✅ CORRECCIÓN: service.confirm_return_reception() YA retorna el dict completo
+        result = await service.confirm_return_reception(return_id, reception, current_user.id)
+        
+        # ✅ El result del service YA tiene "success": True
+        # Solo necesitas construir la respuesta con los campos del schema
+        return ReturnReceptionResponse(
+            success=result["success"],  # ← Ya viene en result
+            message=result["message"],
+            return_id=result["return_id"],
+            original_transfer_id=result["original_transfer_id"],
+            received_quantity=result["received_quantity"],
+            product_condition=result["product_condition"],
+            inventory_restored=result["inventory_restored"],
+            warehouse_location=result["warehouse_location"],
+            inventory_change=result["inventory_change"]
+        )
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/health")
 async def warehouse_health():
