@@ -258,7 +258,7 @@ class WarehouseRepository:
         try:
             logger.info(f"Obteniendo solicitudes aceptadas para bodeguero {warehouse_keeper_id}")
             
-            active_statuses = ['accepted', 'courier_assigned']
+            active_statuses = ['accepted', 'courier_assigned', 'delivered']
             
             transfers = self.db.query(TransferRequest).filter(
                 and_(

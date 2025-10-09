@@ -322,7 +322,7 @@ class VendorRepository:
             and_(
                 TransferRequest.requester_id == user_id,
                 TransferRequest.status.in_(['completed', 'cancelled']),
-                func.date(TransferRequest.delivered_at) == today
+                func.date(TransferRequest.confirmed_reception_at) == today
             )
         ).order_by(TransferRequest.delivered_at.desc()).all()
         

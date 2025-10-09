@@ -80,7 +80,7 @@ class WarehouseService:
         
         return AcceptedRequestsResponse(
             success=True,
-            message="Solicitudes aceptadas y en preparación",
+            message="Solicitudes aceptadas y en preparación y las devoluciones pendientes",
             accepted_requests=requests,
             count=len(requests),
             warehouse_info={
