@@ -11,11 +11,12 @@ class ExpensesRepository:
     def __init__(self, db: Session):
         self.db = db
     
-    def create_expense(self, expense_data: Dict[str, Any], user_id: int, location_id: int) -> Expense:
+    def create_expense(self, expense_data: Dict[str, Any], user_id: int, location_id: int, company_id: int) -> Expense:
         """Crear nuevo gasto"""
         expense = Expense(
             user_id=user_id,
             location_id=location_id,
+            company_id=company_id,
             concept=expense_data['concept'],
             amount=expense_data['amount'],
             receipt_image=expense_data.get('receipt_image'),
@@ -28,27 +29,29 @@ class ExpensesRepository:
         self.db.refresh(expense)
         return expense
     
-    def get_expenses_by_user_and_date(self, user_id: int, target_date: date) -> List[Expense]:
+    def get_expenses_by_user_and_date(self, user_id: int, target_date: date, company_id: int) -> List[Expense]:
         """Obtener gastos por usuario y fecha"""
         return self.db.query(Expense).filter(
             and_(
                 Expense.user_id == user_id,
+                Expense.company_id == company_id,
                 func.date(Expense.expense_date) == target_date
             )
         ).order_by(Expense.expense_date.desc()).all()
     
-    def get_expenses_by_location_and_date(self, location_id: int, target_date: date) -> List[Expense]:
+    def get_expenses_by_location_and_date(self, location_id: int, target_date: date, company_id: int) -> List[Expense]:
         """Obtener gastos por ubicación y fecha"""
         return self.db.query(Expense).filter(
             and_(
                 Expense.location_id == location_id,
+                Expense.company_id == company_id,
                 func.date(Expense.expense_date) == target_date
             )
         ).order_by(Expense.expense_date.desc()).all()
     
-    def get_daily_expenses_summary(self, user_id: int, target_date: date) -> Dict[str, Any]:
+    def get_daily_expenses_summary(self, user_id: int, target_date: date, company_id: int) -> Dict[str, Any]:
         """Obtener resumen de gastos del día"""
-        expenses = self.get_expenses_by_user_and_date(user_id, target_date)
+        expenses = self.get_expenses_by_user_and_date(user_id, target_date, company_id)
         
         if not expenses:
             return {

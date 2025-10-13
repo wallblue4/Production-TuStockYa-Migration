@@ -21,7 +21,8 @@ class TransfersService:
     async def create_transfer_request(
         self,
         transfer_data: TransferRequestCreate,
-        requester_id: int
+        requester_id: int,
+        company_id: int
     ) -> TransferRequestResponse:
         """Crear solicitud de transferencia con validación de stock"""
         
@@ -35,7 +36,8 @@ class TransfersService:
             
             # ✅ OBTENER NOMBRE REAL DE UBICACIÓN ORIGEN
             source_location = self.db.query(Location).filter(
-                Location.id == transfer_data.source_location_id
+                Location.id == transfer_data.source_location_id,
+                Location.company_id == company_id
             ).first()
             
             if not source_location:
@@ -47,7 +49,8 @@ class TransfersService:
             
             # ✅ OBTENER NOMBRE REAL DE UBICACIÓN DESTINO
             destination_location = self.db.query(Location).filter(
-                Location.id == transfer_data.destination_location_id
+                Location.id == transfer_data.destination_location_id,
+                Location.company_id == company_id
             ).first()
             
             if not destination_location:
@@ -96,7 +99,7 @@ class TransfersService:
             
             # Crear transferencia
             transfer_dict = transfer_data.dict()
-            transfer = self.repository.create_transfer_request(transfer_dict, requester_id)
+            transfer = self.repository.create_transfer_request(transfer_dict, requester_id, company_id)
             
             logger.info(f"✅ Transferencia creada: ID #{transfer.id}")
             logger.info(f"   Origen: {source_location.name} (ID: {source_location.id})")
@@ -144,7 +147,8 @@ class TransfersService:
         received_quantity: int,
         condition_ok: bool,
         notes: str,
-        current_user: Any
+        current_user: Any,
+        company_id: int
     ) -> Dict[str, Any]:
         """VE008: Confirmar recepción con actualización automática de inventario"""
         
@@ -155,7 +159,7 @@ class TransfersService:
             logger.info(f"   Usuario: {current_user.id}")
             
             success = self.repository.confirm_reception(
-                transfer_id, received_quantity, condition_ok, notes, current_user.id
+                transfer_id, received_quantity, condition_ok, notes, current_user.id, company_id
             )
             
             if not success:
@@ -183,10 +187,28 @@ class TransfersService:
             )
 
 
+    async def get_my_transfer_requests(self, user_id: int, user_info: Dict[str, Any], company_id: int) -> Dict[str, Any]:
+        """Obtener mis solicitudes de transferencia"""
+        transfers = self.repository.get_transfer_requests_by_user(user_id, company_id)
+        summary = self.repository.get_transfer_summary(user_id, company_id)
+        
+        return {
+            "success": True,
+            "message": "Mis solicitudes de transferencia",
+            "transfers": transfers,
+            "count": len(transfers),
+            "summary": summary,
+            "user_info": {
+                "name": f"{user_info['first_name']} {user_info['last_name']}",
+                "user_id": user_id
+            }
+        }
+
     async def create_return_request(
         self,
         return_data: ReturnRequestCreate,
-        requester_id: int
+        requester_id: int,
+        company_id: int
     ) -> ReturnRequestResponse:
         """
         VE006: Crear solicitud de devolución de producto
@@ -205,7 +227,8 @@ class TransfersService:
             
             # ==================== VALIDACIÓN 1: TRANSFERENCIA ORIGINAL ====================
             original = self.db.query(TransferRequest).filter(
-                TransferRequest.id == return_data.original_transfer_id
+                TransferRequest.id == return_data.original_transfer_id,
+                TransferRequest.company_id == company_id
             ).first()
             
             if not original:
@@ -249,6 +272,7 @@ class TransfersService:
             existing_return = self.db.query(TransferRequest).filter(
                 and_(
                     TransferRequest.original_transfer_id == original.id,
+                    TransferRequest.company_id == company_id,
                     TransferRequest.status.in_(['pending', 'accepted', 'in_transit', 'delivered'])
                 )
             ).first()
@@ -270,6 +294,7 @@ class TransfersService:
             return_transfer = TransferRequest(
                 original_transfer_id=original.id,
                 requester_id=requester_id,
+                company_id=company_id,
                 
                 # ← INVERTIR ubicaciones (clave del return)
                 source_location_id=original.destination_location_id,  # Local vendedor
@@ -306,7 +331,8 @@ class TransfersService:
             
             # ==================== CREAR NOTIFICACIÓN ====================
             source_location = self.db.query(Location).filter(
-                Location.id == original.source_location_id
+                Location.id == original.source_location_id,
+                Location.company_id == company_id
             ).first()
             
             notification = ReturnNotification(
@@ -368,9 +394,9 @@ class TransfersService:
                 detail=f"Error creando devolución: {str(e)}"
             )
     
-    async def get_my_returns(self, vendor_id: int, user_info: Dict[str, Any]) -> Dict[str, Any]:
+    async def get_my_returns(self, vendor_id: int, user_info: Dict[str, Any], company_id: int) -> Dict[str, Any]:
         """Obtener mis devoluciones activas"""
-        returns = self.repository.get_returns_by_vendor(vendor_id)
+        returns = self.repository.get_returns_by_vendor(vendor_id, company_id)
         
         summary = {
             "total_returns": len(returns),

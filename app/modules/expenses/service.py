@@ -20,7 +20,8 @@ class ExpensesService:
         expense_data: ExpenseCreateRequest,
         receipt_image: Optional[UploadFile],  # UploadFile directamente
         user_id: int,
-        location_id: int
+        location_id: int,
+        company_id: int
     ) -> ExpenseResponse:
         """Crear nuevo gasto operativo"""
         
@@ -41,7 +42,7 @@ class ExpensesService:
             expense_dict = expense_data.dict()
             expense_dict['receipt_image'] = receipt_url  # URL de Cloudinary
             
-            expense = self.repository.create_expense(expense_dict, user_id, location_id)
+            expense = self.repository.create_expense(expense_dict, user_id, location_id, company_id)
             
             return ExpenseResponse(
                 success=True,
@@ -66,10 +67,10 @@ class ExpensesService:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error registrando gasto: {str(e)}")
     
-    async def get_daily_expenses(self, user_id: int, target_date: date) -> DailyExpensesResponse:
+    async def get_daily_expenses(self, user_id: int, target_date: date, company_id: int) -> DailyExpensesResponse:
         """Obtener gastos del día"""
-        expenses = self.repository.get_expenses_by_user_and_date(user_id, target_date)
-        summary = self.repository.get_daily_expenses_summary(user_id, target_date)
+        expenses = self.repository.get_expenses_by_user_and_date(user_id, target_date, company_id)
+        summary = self.repository.get_daily_expenses_summary(user_id, target_date, company_id)
         
         expenses_data = []
         for expense in expenses:

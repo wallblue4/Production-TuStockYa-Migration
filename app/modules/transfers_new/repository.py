@@ -16,10 +16,11 @@ class TransfersRepository:
     def __init__(self, db: Session):
         self.db = db
     
-    def create_transfer_request(self, transfer_data: Dict[str, Any], requester_id: int) -> TransferRequest:
+    def create_transfer_request(self, transfer_data: Dict[str, Any], requester_id: int, company_id: int) -> TransferRequest:
         """Crear nueva solicitud de transferencia"""
         transfer = TransferRequest(
             requester_id=requester_id,
+            company_id=company_id,
             source_location_id=transfer_data['source_location_id'],
             destination_location_id=transfer_data['destination_location_id'],
             sneaker_reference_code=transfer_data['sneaker_reference_code'],
@@ -40,7 +41,7 @@ class TransfersRepository:
         self.db.refresh(transfer)
         return transfer
     
-    def get_transfer_requests_by_user(self, user_id: int) -> List[Dict[str, Any]]:
+    def get_transfer_requests_by_user(self, user_id: int, company_id: int) -> List[Dict[str, Any]]:
         """Obtener solicitudes de transferencia por usuario - igual que backend antiguo"""
         # Query compleja como en el backend standalone
         query = text("""
@@ -65,11 +66,11 @@ class TransfersRepository:
             LEFT JOIN users c ON tr.courier_id = c.id
             LEFT JOIN users wk ON tr.warehouse_keeper_id = wk.id
             LEFT JOIN transfer_requests orig ON tr.original_transfer_id = orig.id
-            WHERE tr.requester_id = :user_id
+            WHERE tr.requester_id = :user_id AND tr.company_id = :company_id
             ORDER BY tr.requested_at DESC
         """)
         
-        results = self.db.execute(query, {"user_id": user_id}).fetchall()
+        results = self.db.execute(query, {"user_id": user_id, "company_id": company_id}).fetchall()
         
         transfers = []
         for row in results:
@@ -192,9 +193,9 @@ class TransfersRepository:
             'progress_percentage': 0
         })
     
-    def get_transfer_summary(self, user_id: int) -> Dict[str, Any]:
+    def get_transfer_summary(self, user_id: int, company_id: int) -> Dict[str, Any]:
         """Obtener resumen de transferencias del usuario"""
-        transfers = self.get_transfer_requests_by_user(user_id)
+        transfers = self.get_transfer_requests_by_user(user_id, company_id)
         
         summary = {
             "total_requests": len(transfers),
@@ -216,7 +217,8 @@ class TransfersRepository:
         received_quantity: int, 
         condition_ok: bool, 
         notes: str, 
-        user_id: int
+        user_id: int,
+        company_id: int
     ) -> bool:
         """Confirmar recepción de transferencia con actualización de inventario"""
         try:
@@ -224,7 +226,8 @@ class TransfersRepository:
             
             # Obtener transferencia
             transfer = self.db.query(TransferRequest).filter(
-                TransferRequest.id == transfer_id
+                TransferRequest.id == transfer_id,
+                TransferRequest.company_id == company_id
             ).first()
             
             if not transfer:
@@ -361,12 +364,13 @@ class TransfersRepository:
 
     # AGREGAR AL FINAL DE app/modules/transfers_new/repository.py
 
-    def get_returns_by_vendor(self, vendor_id: int) -> List[Dict[str, Any]]:
+    def get_returns_by_vendor(self, vendor_id: int, company_id: int) -> List[Dict[str, Any]]:
         """Obtener devoluciones del vendedor"""
         try:
             returns = self.db.query(TransferRequest).filter(
                 and_(
                     TransferRequest.requester_id == vendor_id,
+                    TransferRequest.company_id == company_id,
                     TransferRequest.request_type == 'return',
                     TransferRequest.original_transfer_id.isnot(None)
                 )

@@ -25,7 +25,8 @@ class SalesService:
         sale_data: SaleCreateRequest,
         receipt_image: Optional[UploadFile],
         seller_id: int,
-        location_id: int
+        location_id: int,
+        company_id: int
     ) -> SaleResponse:
         """
         Crear venta completa.
@@ -39,9 +40,10 @@ class SalesService:
         try:
             logger.info(f"Iniciando venta - Vendedor: {seller_id}, Location: {location_id}")
             
-            # PASO 1: Obtener ubicación
+            # PASO 1: Obtener ubicación dentro de la misma empresa
             location = self.db.query(Location).filter(
-                Location.id == location_id
+                Location.id == location_id,
+                Location.company_id == company_id
             ).first()
             
             if not location:
@@ -59,7 +61,8 @@ class SalesService:
                     seller_id=seller_id,
                     location_id=location_id,
                     location_name=location.name,
-                    receipt_url=receipt_url
+                    receipt_url=receipt_url,
+                    company_id=company_id
                 )
                 
                 logger.info(f"Venta {sale.id} completada exitosamente")
@@ -79,13 +82,14 @@ class SalesService:
             raise HTTPException(500, detail=f"Error creando venta: {str(e)}")
     
     async def get_daily_sales(
-        self, 
-        seller_id: int, 
-        target_date: date
+        self,
+        seller_id: int,
+        target_date: date,
+        company_id: int
     ) -> DailySalesResponse:
         """Obtener ventas del día con resumen"""
-        sales = self.repository.get_sales_by_seller_and_date(seller_id, target_date)
-        summary = self.repository.get_daily_sales_summary(seller_id, target_date)
+        sales = self.repository.get_sales_by_seller_and_date(seller_id, target_date, company_id)
+        summary = self.repository.get_daily_sales_summary(seller_id, target_date, company_id)
         
         sales_data = [
             {
@@ -95,7 +99,7 @@ class SalesService:
                 "confirmed": sale.confirmed,
                 "requires_confirmation": sale.requires_confirmation,
                 "sale_date": sale.sale_date.isoformat(),
-                "items_count": len(self.repository.get_sale_items(sale.id)),
+                "items_count": len(self.repository.get_sale_items(sale.id, company_id)),
                 "notes": sale.notes,
                 "receipt_image_url": sale.receipt_image
             }
@@ -112,15 +116,16 @@ class SalesService:
         )
     
     async def confirm_sale(
-        self, 
-        sale_id: int, 
-        confirmed: bool, 
-        confirmation_notes: str, 
-        user_id: int
+        self,
+        sale_id: int,
+        confirmed: bool,
+        confirmation_notes: str,
+        user_id: int,
+        company_id: int
     ) -> dict:
         """Confirmar o rechazar una venta"""
         success = self.repository.confirm_sale(
-            sale_id, confirmed, confirmation_notes, user_id
+            sale_id, confirmed, confirmation_notes, user_id, company_id
         )
         
         if not success:
@@ -134,15 +139,15 @@ class SalesService:
             "confirmed_at": datetime.now().isoformat()
         }
     
-    async def get_pending_confirmation_sales(self, seller_id: int) -> dict:
+    async def get_pending_confirmation_sales(self, seller_id: int, company_id: int) -> dict:
         """Obtener ventas pendientes de confirmación"""
-        pending_sales = self.repository.get_pending_confirmation_sales(seller_id)
+        pending_sales = self.repository.get_pending_confirmation_sales(seller_id, company_id)
         
         sales_data = []
         total_pending = Decimal('0')
         
         for sale in pending_sales:
-            items = self.repository.get_sale_items(sale.id)
+            items = self.repository.get_sale_items(sale.id, company_id)
             sales_data.append({
                 "id": sale.id,
                 "total_amount": float(sale.total_amount),

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.config.database import get_db
 from app.core.auth.dependencies import require_roles
+from app.core.auth.dependencies import get_current_company_id
 from .service import TransfersService
 from .schemas import TransferRequestCreate, TransferRequestResponse, MyTransferRequestsResponse , ReturnRequestCreate, ReturnRequestResponse
 
@@ -13,6 +14,7 @@ router = APIRouter()
 async def create_transfer_request(
     transfer_data: TransferRequestCreate,
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -30,11 +32,12 @@ async def create_transfer_request(
     - Transferencia entre bodegas
     """
     service = TransfersService(db)
-    return await service.create_transfer_request(transfer_data, current_user.id)
+    return await service.create_transfer_request(transfer_data, current_user.id, company_id)
 
 @router.get("/my-requests", response_model=MyTransferRequestsResponse)
 async def get_my_transfer_requests(
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -53,13 +56,14 @@ async def get_my_transfer_requests(
         'last_name': current_user.last_name
     }
     
-    return await service.get_my_transfer_requests(current_user.id, user_info)
+    return await service.get_my_transfer_requests(current_user.id, user_info, company_id)
 
 
 @router.post("/create-return", response_model=ReturnRequestResponse)
 async def create_return_request(
     return_data: ReturnRequestCreate,
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -93,11 +97,12 @@ async def create_return_request(
     - Al confirmar recepción: SUMA inventario (no resta)
     """
     service = TransfersService(db)
-    return await service.create_return_request(return_data, current_user.id)
+    return await service.create_return_request(return_data, current_user.id, company_id)
 
 @router.get("/my-returns")
 async def get_my_returns(
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -117,7 +122,7 @@ async def get_my_returns(
         'last_name': current_user.last_name
     }
     
-    return await service.get_my_returns(current_user.id, user_info)
+    return await service.get_my_returns(current_user.id, user_info, company_id)
 
 
 @router.get("/health")

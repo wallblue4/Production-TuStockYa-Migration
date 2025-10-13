@@ -6,6 +6,7 @@ from typing import Optional
 
 from app.config.database import get_db
 from app.core.auth.dependencies import require_roles
+from app.core.auth.dependencies import get_current_company_id
 from .service import ExpensesService
 from .schemas import ExpenseCreateRequest, ExpenseResponse, DailyExpensesResponse
 
@@ -19,6 +20,7 @@ async def create_expense(
     notes: str = Form("", description="Notas adicionales"),
     receipt_image: Optional[UploadFile] = File(None, description="Comprobante del gasto"),
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -43,12 +45,14 @@ async def create_expense(
         expense_data=expense_request,
         receipt_image=receipt_image,  # UploadFile directamente
         user_id=current_user.id,
-        location_id=current_user.location_id
+        location_id=current_user.location_id,
+        company_id=company_id
     )
 
 @router.get("/today", response_model=DailyExpensesResponse)
 async def get_today_expenses(
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -64,12 +68,14 @@ async def get_today_expenses(
     service = ExpensesService(db)
     return await service.get_daily_expenses(
         user_id=current_user.id,
-        target_date=date.today()
+        target_date=date.today(),
+        company_id=company_id
     )
 
 @router.get("/categories")
 async def get_expense_categories(
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """Obtener categorías y conceptos sugeridos para gastos"""

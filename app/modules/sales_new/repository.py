@@ -24,7 +24,8 @@ class SalesRepository:
         seller_id: int,
         location_id: int,
         location_name: str,
-        receipt_url: Optional[str] = None
+        receipt_url: Optional[str] = None,
+        company_id: Optional[int] = None
     ) -> Sale:
         """
         Crear venta con actualización de inventario en transacción atómica.
@@ -72,6 +73,7 @@ class SalesRepository:
             sale = Sale(
                 seller_id=seller_id,
                 location_id=location_id,
+                company_id=company_id,
                 total_amount=Decimal(str(sale_data['total_amount'])),
                 receipt_image=receipt_url,
                 notes=sale_data.get('notes'),
@@ -94,6 +96,7 @@ class SalesRepository:
             for item_data, (product_size, product) in zip(sale_data['items'], reserved_products):
                 sale_item = SaleItem(
                     sale_id=sale.id,
+                    company_id=company_id,
                     sneaker_reference_code=product.reference_code,  # De BD
                     brand=product.brand,                            # De BD
                     model=product.model,                            # De BD
@@ -103,11 +106,12 @@ class SalesRepository:
                     unit_price=Decimal(str(item_data['unit_price'])),
                     subtotal=Decimal(str(item_data['quantity'])) * Decimal(str(item_data['unit_price']))
                 )
-                self.db.add(sale_item)
+                sale_items.append(sale_item)
 
             
             # Bulk insert de items
-            self.db.bulk_save_objects(sale_items)
+            if sale_items:
+                self.db.bulk_save_objects(sale_items)
             logger.info(f"{len(sale_items)} items agregados")
             
             # PASO 5: CREAR SALE_PAYMENTS
@@ -115,13 +119,16 @@ class SalesRepository:
             for payment_data in sale_data['payment_methods']:
                 sale_payment = SalePayment(
                     sale_id=sale.id,
+                    company_id=company_id,
                     payment_type=payment_data['type'],
                     amount=Decimal(str(payment_data['amount'])),
                     reference=payment_data.get('reference')
                 )
-                self.db.add(sale_item)
+                sale_payments.append(sale_payment)
 
             
+            if sale_payments:
+                self.db.bulk_save_objects(sale_payments)
             logger.info(f"{len(sale_data['payment_methods'])} métodos de pago agregados")
         
             # PASO 6: ACTUALIZAR INVENTARIO
@@ -149,7 +156,7 @@ class SalesRepository:
             self.db.rollback()
             raise Exception(f"Error creando venta: {str(e)}")
     
-    def get_sales_by_seller_and_date(self, seller_id: int, target_date: date) -> List[Sale]:
+    def get_sales_by_seller_and_date(self, seller_id: int, target_date: date, company_id: int) -> List[Sale]:
         """
         Obtener ventas por vendedor y fecha.
         
@@ -158,24 +165,26 @@ class SalesRepository:
         return self.db.query(Sale).filter(
             and_(
                 Sale.seller_id == seller_id,
+                Sale.company_id == company_id,
                 func.date(Sale.sale_date) == target_date
             )
         ).order_by(Sale.sale_date.desc()).all()
     
-    def get_pending_confirmation_sales(self, seller_id: int) -> List[Sale]:
+    def get_pending_confirmation_sales(self, seller_id: int, company_id: int) -> List[Sale]:
         """Obtener ventas pendientes de confirmación"""
         return self.db.query(Sale).filter(
             and_(
                 Sale.seller_id == seller_id,
+                Sale.company_id == company_id,
                 Sale.requires_confirmation == True,
                 Sale.confirmed == False
             )
         ).order_by(Sale.sale_date.desc()).all()
     
-    def confirm_sale(self, sale_id: int, confirmed: bool, notes: str, user_id: int) -> bool:
+    def confirm_sale(self, sale_id: int, confirmed: bool, notes: str, user_id: int, company_id: int) -> bool:
         """Confirmar o rechazar una venta"""
         try:
-            sale = self.db.query(Sale).filter(Sale.id == sale_id).first()
+            sale = self.db.query(Sale).filter(Sale.id == sale_id, Sale.company_id == company_id).first()
             if not sale:
                 return False
             
@@ -195,13 +204,16 @@ class SalesRepository:
             self.db.rollback()
             return False
     
-    def get_sale_items(self, sale_id: int) -> List[SaleItem]:
+    def get_sale_items(self, sale_id: int, company_id: int) -> List[SaleItem]:
         """Obtener items de una venta"""
         return self.db.query(SaleItem).filter(
-            SaleItem.sale_id == sale_id
+            and_(
+                SaleItem.sale_id == sale_id,
+                SaleItem.company_id == company_id
+            )
         ).all()
     
-    def get_daily_sales_summary(self, seller_id: int, target_date: date) -> Dict[str, Any]:
+    def get_daily_sales_summary(self, seller_id: int, target_date: date, company_id: int) -> Dict[str, Any]:
         """
         Resumen de ventas del día.
         
@@ -230,6 +242,7 @@ class SalesRepository:
         ).filter(
             and_(
                 Sale.seller_id == seller_id,
+                Sale.company_id == company_id,
                 func.date(Sale.sale_date) == target_date
             )
         ).first()
