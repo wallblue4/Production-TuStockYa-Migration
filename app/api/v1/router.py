@@ -10,6 +10,7 @@ from app.modules.transfers_new.router import router as transfers_router
 from app.modules.warehouse_new.router import router as warehouse_router 
 from app.modules.courier.router import router as courier_router
 from app.modules.inventory.router import router as inventory_router
+from app.modules.superadmin.router import router as superadmin_router
 
 
 from app.modules.admin import admin_router
@@ -86,6 +87,12 @@ api_router.include_router(
     inventory_router,
     prefix="/inventory",
     tags=["Inventory Management"]
+)
+
+api_router.include_router(
+    superadmin_router,
+    prefix="/superadmin",
+    tags=["Superadmin Management"]
 )
 
 # ==================== ENDPOINTS RAÍZ ACTUALIZADOS ====================

@@ -35,19 +35,34 @@ async def get_current_user(
     if payload is None:
         raise AuthenticationError("Token inválido o expirado")
     
-    # Obtener user_id del payload
+    # Obtener datos del payload
     user_id: int = payload.get("user_id")
+    role: str = payload.get("role")
     company_id: int = payload.get("company_id")
 
+    # ✅ NUEVO: Manejo especial para superadmin
+    if role == "superadmin":
+        # Superadmin no requiere company_id
+        user = db.query(User).filter(User.id == user_id, User.role == "superadmin").first()
+        
+        if user is None:
+            raise AuthenticationError("Superadmin no encontrado")
+        
+        if not user.is_active:
+            raise AuthenticationError("Superadmin inactivo")
+        
+        return user
+    
+    # Para roles normales, validar company_id
     if user_id is None or company_id is None:
         raise AuthenticationError("Payload del token inválido - faltan user_id o company_id")
     
     # Buscar usuario en base de datos con relaciones
     user = (
         db.query(User)
-        .join(User.company)  # ✅ NUEVO: Join con company
+        .join(User.company)
         .filter(User.id == user_id)
-        .filter(User.company_id == company_id)  # ✅ NUEVO: Validar company_id
+        .filter(User.company_id == company_id)
         .first()
     )
     
@@ -141,3 +156,19 @@ async def get_current_company(
 ) -> Company:
     """Obtener empresa completa del usuario actual"""
     return current_user.company
+
+
+def get_superadmin_user(current_user: User = Depends(require_roles(["superadmin"]))):
+    """Dependency para superusuarios"""
+    return current_user
+
+def can_manage_company(current_user: User, target_company_id: int) -> bool:
+    """Verificar si usuario puede gestionar una empresa"""
+    
+    # Superadmin puede gestionar todas las empresas
+    if current_user.role == "superadmin":
+        return True
+    
+    # Otros usuarios solo pueden gestionar su propia empresa
+    return current_user.company_id == target_company_id
+

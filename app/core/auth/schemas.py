@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 
@@ -22,14 +22,15 @@ class UserResponse(BaseModel):
     first_name: str
     last_name: str
     role: str
-    company_id: int
+    company_id: int | None
+    company_name: str | None
     location_id: Optional[int] = None
     location_name: Optional[str] = None
     is_active: bool
 
     company_name: Optional[str] = None
     company_subdomain: Optional[str] = None
-    
+
     class Config:
         from_attributes = True
         json_schema_extra = {

@@ -52,20 +52,35 @@ async def login(
             detail="Usuario inactivo"
         )
     
-    # Crear token de acceso
-    access_token = AuthService.create_access_token(
-        data={
-            "user_id": user.id,
-            "email": user.email,
-            "role": user.role,
-            "company_id": user.company_id
-        }
-    )
+    # ✅ CORREGIDO: Preparar datos del token según el rol
+    token_data = {
+        "user_id": user.id,
+        "email": user.email,
+        "role": user.role
+    }
     
-    # Obtener información de ubicación si existe
+    # Solo agregar company_id si NO es superadmin
+    if user.role != "superadmin":
+        token_data["company_id"] = user.company_id
+    
+    # Crear token de acceso
+    access_token = AuthService.create_access_token(data=token_data)
+    
+    # ✅ CORREGIDO: Obtener información de ubicación y empresa según el rol
     location_name = None
-    if user.location:
-        location_name = user.location.name
+    company_name = None
+    company_subdomain = None
+    company_id = None
+    
+    if user.role != "superadmin":
+        # Para usuarios normales
+        if user.location:
+            location_name = user.location.name
+        
+        if user.company:
+            company_name = user.company.name
+            company_subdomain = user.company.subdomain
+            company_id = user.company_id
     
     return TokenResponse(
         access_token=access_token,
@@ -76,14 +91,15 @@ async def login(
             first_name=user.first_name,
             last_name=user.last_name,
             role=user.role,
-            company_id=user.company_id,
+            company_id=company_id,  # ✅ None para superadmin
             location_id=user.location_id,
             location_name=location_name,
-            company_name=user.company.name,
-            company_subdomain=user.company.subdomain,
+            company_name=company_name,  # ✅ None para superadmin
+            company_subdomain=company_subdomain,  # ✅ None para superadmin
             is_active=user.is_active
         )
     )
+
 
 @router.post("/login-json", response_model=TokenResponse)
 async def login_json(
@@ -95,79 +111,111 @@ async def login_json(
     
     **Body:**
     ```json
-    {
-        "email": "user@example.com",
-        "password": "password123"
-    }
-    ```
+        {
+            "email": "user@example.com",
+            "password": "password123"
+        }
     """
-    
+
     # Buscar usuario por email
     user = db.query(User).filter(User.email == user_login.email).first()
-    
+
     if not user or not AuthService.verify_password(user_login.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email o contraseña incorrectos"
         )
-    
+
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Usuario inactivo"
         )
-    
-    # Crear token
-    access_token = AuthService.create_access_token(
-        data={
-            "user_id": user.id,
-            "email": user.email,
-            "role": user.role
-        }
-    )
-    
-    # Obtener información de ubicación
+
+    # ✅ CORREGIDO: Preparar datos del token según el rol
+    token_data = {
+        "user_id": user.id,
+        "email": user.email,
+        "role": user.role
+    }
+
+    # Solo agregar company_id si NO es superadmin
+    if user.role != "superadmin":
+        token_data["company_id"] = user.company_id
+
+    # Crear token de acceso
+    access_token = AuthService.create_access_token(data=token_data)
+
+    # ✅ CORREGIDO: Obtener información de ubicación y empresa según el rol
     location_name = None
-    if user.location:
-        location_name = user.location.name
-    
+    company_name = None
+    company_subdomain = None
+    company_id = None
+
+    if user.role != "superadmin":
+        # Para usuarios normales
+        if user.location:
+            location_name = user.location.name
+        
+        if user.company:
+            company_name = user.company.name
+            company_subdomain = user.company.subdomain
+            company_id = user.company_id
+
     return TokenResponse(
         access_token=access_token,
+        token_type="bearer",
         user=UserResponse(
             id=user.id,
             email=user.email,
             first_name=user.first_name,
             last_name=user.last_name,
             role=user.role,
+            company_id=company_id,  # ✅ None para superadmin
             location_id=user.location_id,
             location_name=location_name,
+            company_name=company_name,  # ✅ None para superadmin
+            company_subdomain=company_subdomain,  # ✅ None para superadmin
             is_active=user.is_active
         )
     )
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_info(
-    current_user: User = Depends(get_current_user)
+current_user: User = Depends(get_current_user)
 ):
     """
     Obtener información del usuario actual
-    
     **Headers requeridos:**
     - Authorization: Bearer {token}
     """
-    
+
+    # ✅ CORREGIDO: Manejar superadmin
     location_name = None
-    if current_user.location:
-        location_name = current_user.location.name
-    
+    company_name = None
+    company_subdomain = None
+    company_id = None
+
+    if current_user.role != "superadmin":
+        if current_user.location:
+            location_name = current_user.location.name
+        
+        if current_user.company:
+            company_name = current_user.company.name
+            company_subdomain = current_user.company.subdomain
+            company_id = current_user.company_id
+
     return UserResponse(
         id=current_user.id,
         email=current_user.email,
         first_name=current_user.first_name,
         last_name=current_user.last_name,
         role=current_user.role,
+        company_id=company_id,
         location_id=current_user.location_id,
         location_name=location_name,
+        company_name=company_name,
+        company_subdomain=company_subdomain,
         is_active=current_user.is_active
     )
 
@@ -183,33 +231,46 @@ async def logout():
 # Endpoint para verificar roles (útil para debugging)
 @router.get("/check-permissions")
 async def check_permissions(
-    current_user: User = Depends(get_current_user)
+current_user: User = Depends(get_current_user)
 ):
     """Verificar permisos del usuario actual"""
-    
     permissions = {
         "seller": ["scan", "sell", "expenses", "transfers"],
+        "vendedor": ["scan", "sell", "expenses", "transfers"],
         "bodeguero": ["inventory", "transfers", "warehouse"],
         "corredor": ["transport", "deliveries"],
         "administrador": ["all_operations", "user_management"],
-        "boss": ["all_permissions", "executive_dashboard"]
+        "boss": ["all_permissions", "executive_dashboard"],
+        "superadmin": ["global_administration", "all_companies", "system_config"]
     }
-    
+
     user_permissions = permissions.get(current_user.role, [])
-    
-    return {
+
+    response = {
         "user": {
             "id": current_user.id,
             "email": current_user.email,
             "role": current_user.role,
-            "full_name": current_user.full_name
+            "full_name": current_user.full_name,
+            "company_id": current_user.company_id
         },
         "permissions": user_permissions,
         "can_access": {
-            "sales_module": current_user.role in ["seller", "administrador", "boss"],
+            "sales_module": current_user.role in ["seller", "vendedor", "administrador", "boss"],
             "warehouse_module": current_user.role in ["bodeguero", "administrador", "boss"],
             "logistics_module": current_user.role in ["corredor", "administrador", "boss"],
             "admin_panel": current_user.role in ["administrador", "boss"],
-            "executive_dashboard": current_user.role == "boss"
+            "executive_dashboard": current_user.role == "boss",
+            "superadmin_panel": current_user.role == "superadmin"
         }
     }
+
+    # ✅ CORREGIDO: Solo agregar info de empresa si no es superadmin
+    if current_user.role != "superadmin" and current_user.company:
+        response["company"] = {
+            "id": current_user.company.id,
+            "name": current_user.company.name,
+            "subdomain": current_user.company.subdomain
+        }
+
+    return response

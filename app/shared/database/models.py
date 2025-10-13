@@ -16,12 +16,12 @@ Base = declarative_base()
 # =====================================================
 class TimestampMixin:
     """Mixin que agrega campos created_at y updated_at"""
-    created_at = Column(DateTime, nullable=False, default=func.now())
-    updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
+    updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
 
 # =====================================================
-# MODELOS MULTITENANT - NUEVOS
+# MODELOS MULTITENANT
 # =====================================================
 
 class Company(Base, TimestampMixin):
@@ -40,7 +40,7 @@ class Company(Base, TimestampMixin):
     # Suscripción
     subscription_plan = Column(String(20), nullable=False, default='basic')
     subscription_status = Column(String(20), nullable=False, default='active')
-    subscription_started_at = Column(DateTime, default=func.now())
+    subscription_started_at = Column(DateTime, server_default=func.current_timestamp())
     subscription_ends_at = Column(DateTime)
     
     # Límites del plan
@@ -62,7 +62,8 @@ class Company(Base, TimestampMixin):
     
     # Auditoría
     is_active = Column(Boolean, default=True)
-    created_by_user_id = Column(Integer, ForeignKey("users.id"))
+    # ✅ CORREGIDO: use_alter=True para evitar referencia circular
+    created_by_user_id = Column(Integer, ForeignKey("users.id", use_alter=True, name='fk_companies_created_by'))
     
     # Relationships
     users = relationship("User", back_populates="company", foreign_keys="User.company_id")
@@ -71,6 +72,7 @@ class Company(Base, TimestampMixin):
     sales = relationship("Sale", back_populates="company")
     invoices = relationship("CompanyInvoice", back_populates="company")
     subscription_changes = relationship("SubscriptionChange", back_populates="company")
+    mayoreo_items = relationship("Mayoreo", back_populates="company")
     
     @property
     def is_at_location_limit(self) -> bool:
@@ -111,8 +113,9 @@ class CompanyInvoice(Base):
     
     details = Column(JSONB)
     notes = Column(Text)
-    created_at = Column(DateTime, default=func.now())
+    created_at = Column(DateTime, server_default=func.current_timestamp())
     
+    # Relationships
     company = relationship("Company", back_populates="invoices")
 
 
@@ -135,10 +138,11 @@ class SubscriptionChange(Base):
     reason = Column(Text)
     effective_date = Column(Date, nullable=False)
     changed_by_user_id = Column(Integer, ForeignKey("users.id"))
-    created_at = Column(DateTime, default=func.now())
+    created_at = Column(DateTime, server_default=func.current_timestamp())
     
+    # Relationships
     company = relationship("Company", back_populates="subscription_changes")
-    changed_by = relationship("User")
+    changed_by = relationship("User", foreign_keys=[changed_by_user_id])
 
 
 class PlanTemplate(Base):
@@ -158,54 +162,68 @@ class PlanTemplate(Base):
     is_active = Column(Boolean, default=True)
     sort_order = Column(Integer, default=0)
     
-    created_at = Column(DateTime, default=func.now())
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime, server_default=func.current_timestamp())
+    updated_at = Column(DateTime, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
 
 # =====================================================
 # LOCALIZACIONES
 # =====================================================
 
-class Location(Base, TimestampMixin):
+class Location(Base):
     """Modelo de Ubicación (Local o Bodega)"""
     __tablename__ = "locations"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     type = Column(String(50), nullable=False)
     address = Column(Text)
     phone = Column(String(50))
     is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, server_default=func.current_timestamp())
     
     # Relationships
-    company = relationship("Company", back_populates="locations")  # ✅ NUEVO
+    company = relationship("Company", back_populates="locations")
     users = relationship("User", back_populates="location")
-    products = relationship("Product", back_populates="location", foreign_keys="Product.location_name", primaryjoin="Location.name==Product.location_name")
+    expenses = relationship("Expense", back_populates="location")
+    sales = relationship("Sale", back_populates="location")
+    cost_configurations = relationship("CostConfiguration", back_populates="location")
+    # NO agregar 'products' porque Product usa location_name (String) no location_id
 
 
 # =====================================================
 # USUARIOS
 # =====================================================
 
-class User(Base, TimestampMixin):
+class User(Base):
     """Modelo de Usuario"""
     __tablename__ = "users"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    # ✅ NULLABLE para superadmin
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
     email = Column(String(255), nullable=False, unique=True)
     password_hash = Column(String(255), nullable=False)
     first_name = Column(String(255), nullable=False)
     last_name = Column(String(255), nullable=False)
-    role = Column(String(50), default='seller', nullable=False)
+    # ✅ CORREGIDO: Default 'vendedor' según DDL
+    role = Column(String(50), default='vendedor', nullable=False)
     location_id = Column(Integer, ForeignKey("locations.id"))
     is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, server_default=func.current_timestamp())
     
     # Relationships
-    company = relationship("Company", back_populates="users", foreign_keys=[company_id])  # ✅ NUEVO
+    company = relationship("Company", back_populates="users", foreign_keys=[company_id])
     location = relationship("Location", back_populates="users")
+    sales = relationship("Sale", back_populates="seller", foreign_keys="Sale.seller_id")
+    expenses = relationship("Expense", back_populates="user")
     location_assignments = relationship("UserLocationAssignment", back_populates="user")
+    
+    created_cost_configurations = relationship("CostConfiguration", foreign_keys="CostConfiguration.created_by_user_id", back_populates="created_by")
+    paid_cost_payments = relationship("CostPayment", foreign_keys="CostPayment.paid_by_user_id", back_populates="paid_by")
+    created_cost_exceptions = relationship("CostPaymentException", foreign_keys="CostPaymentException.created_by_user_id", back_populates="created_by")
+    deleted_cost_archives = relationship("CostDeletionArchive", foreign_keys="CostDeletionArchive.deleted_by_user_id", back_populates="deleted_by")
     
     @property
     def full_name(self):
@@ -221,7 +239,7 @@ class Product(Base, TimestampMixin):
     __tablename__ = "products"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     reference_code = Column(String(255), nullable=False, index=True)
     description = Column(String(255), nullable=False)
     brand = Column(String(255))
@@ -233,6 +251,7 @@ class Product(Base, TimestampMixin):
     location_name = Column(String(255), nullable=False, index=True)
     unit_price = Column(Numeric(10, 2), default=0.0)
     box_price = Column(Numeric(10, 2), default=0.0)
+    # ✅ CORREGIDO: Integer según DDL
     is_active = Column(Integer, default=1)
     
     __table_args__ = (
@@ -240,9 +259,9 @@ class Product(Base, TimestampMixin):
     )
     
     # Relationships
-    company = relationship("Company", back_populates="products")  # ✅ NUEVO
-    sizes = relationship("ProductSize", back_populates="product")
-    mappings = relationship("ProductMapping", back_populates="product")
+    company = relationship("Company", back_populates="products")
+    sizes = relationship("ProductSize", back_populates="product", cascade="all, delete-orphan")
+    mappings = relationship("ProductMapping", back_populates="product", cascade="all, delete-orphan")
     inventory_changes = relationship("InventoryChange", back_populates="product")
 
 
@@ -251,7 +270,7 @@ class ProductSize(Base, TimestampMixin):
     __tablename__ = "product_sizes"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     size = Column(String(255), nullable=False)
     quantity = Column(Integer, default=0)
@@ -267,14 +286,14 @@ class ProductMapping(Base):
     __tablename__ = "product_mappings"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     api_reference_code = Column(String(255), nullable=False)
     model_name = Column(String(255))
     similarity_score = Column(Numeric(10, 2), default=1.0)
     original_db_id = Column(Integer)
     image_path = Column(String(255))
-    created_at = Column(DateTime, nullable=False, default=func.now())
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
     
     # Relationships
     product = relationship("Product", back_populates="mappings")
@@ -285,7 +304,7 @@ class InventoryChange(Base):
     __tablename__ = "inventory_changes"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     change_type = Column(String(255), nullable=False)
     size = Column(String(255))
@@ -294,7 +313,7 @@ class InventoryChange(Base):
     reference_id = Column(Integer)
     user_id = Column(Integer)
     notes = Column(String(255))
-    created_at = Column(DateTime, nullable=False, default=func.now())
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
     
     # Relationships
     product = relationship("Product", back_populates="inventory_changes")
@@ -309,12 +328,12 @@ class Sale(Base):
     __tablename__ = "sales"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     seller_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
     total_amount = Column(Numeric(10, 2), nullable=False)
     receipt_image = Column(Text)
-    sale_date = Column(DateTime, default=func.now())
+    sale_date = Column(DateTime, server_default=func.current_timestamp())
     status = Column(String(50), default='completed')
     notes = Column(Text)
     requires_confirmation = Column(Boolean, default=False)
@@ -322,11 +341,11 @@ class Sale(Base):
     confirmed_at = Column(DateTime)
     
     # Relationships
-    company = relationship("Company", back_populates="sales")  # ✅ NUEVO
-    seller = relationship("User", foreign_keys=[seller_id])
-    location = relationship("Location")
-    items = relationship("SaleItem", back_populates="sale")
-    payments = relationship("SalePayment", back_populates="sale")
+    company = relationship("Company", back_populates="sales")
+    seller = relationship("User", back_populates="sales", foreign_keys=[seller_id])
+    location = relationship("Location", back_populates="sales")
+    items = relationship("SaleItem", back_populates="sale", cascade="all, delete-orphan")
+    payments = relationship("SalePayment", back_populates="sale", cascade="all, delete-orphan")
 
 
 class SaleItem(Base):
@@ -334,7 +353,7 @@ class SaleItem(Base):
     __tablename__ = "sale_items"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False)
     sneaker_reference_code = Column(String(255), nullable=False)
     brand = Column(String(255), nullable=False)
@@ -354,12 +373,12 @@ class SalePayment(Base):
     __tablename__ = "sale_payments"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False)
     payment_type = Column(String(50), nullable=False)
     amount = Column(Numeric(10, 2), nullable=False)
     reference = Column(String(255))
-    created_at = Column(DateTime, default=func.now())
+    created_at = Column(DateTime, server_default=func.current_timestamp())
     
     # Relationships
     sale = relationship("Sale", back_populates="payments")
@@ -374,18 +393,18 @@ class Expense(Base):
     __tablename__ = "expenses"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
     concept = Column(String(255), nullable=False)
     amount = Column(Numeric(10, 2), nullable=False)
     receipt_image = Column(Text)
-    expense_date = Column(DateTime, default=func.now())
+    expense_date = Column(DateTime, server_default=func.current_timestamp())
     notes = Column(Text)
     
     # Relationships
-    user = relationship("User")
-    location = relationship("Location")
+    user = relationship("User", back_populates="expenses")
+    location = relationship("Location", back_populates="expenses")
 
 
 # =====================================================
@@ -397,7 +416,7 @@ class TransferRequest(Base):
     __tablename__ = "transfer_requests"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     requester_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     source_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
     destination_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
@@ -412,7 +431,7 @@ class TransferRequest(Base):
     courier_id = Column(Integer, ForeignKey("users.id"))
     warehouse_keeper_id = Column(Integer, ForeignKey("users.id"))
     status = Column(String(50), default='pending')
-    requested_at = Column(DateTime, default=func.now())
+    requested_at = Column(DateTime, server_default=func.current_timestamp())
     accepted_at = Column(DateTime)
     picked_up_at = Column(DateTime)
     delivered_at = Column(DateTime)
@@ -436,7 +455,7 @@ class TransferRequest(Base):
 
 
 # =====================================================
-# OTROS MODELOS (agregar company_id a los restantes)
+# DESCUENTOS Y RESERVAS
 # =====================================================
 
 class DiscountRequest(Base):
@@ -444,13 +463,13 @@ class DiscountRequest(Base):
     __tablename__ = "discount_requests"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     seller_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     amount = Column(Numeric(10, 2), nullable=False)
     reason = Column(Text, nullable=False)
     status = Column(String(50), default='pending')
     administrator_id = Column(Integer, ForeignKey("users.id"))
-    requested_at = Column(DateTime, default=func.now())
+    requested_at = Column(DateTime, server_default=func.current_timestamp())
     reviewed_at = Column(DateTime)
     admin_comments = Column(Text)
     
@@ -464,7 +483,7 @@ class ProductReservation(Base):
     __tablename__ = "product_reservations"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     sneaker_reference_code = Column(String(255), nullable=False)
     size = Column(String(50), nullable=False)
     quantity = Column(Integer, nullable=False)
@@ -472,7 +491,7 @@ class ProductReservation(Base):
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
     purpose = Column(String(50), nullable=False)
     status = Column(String(50), default='active')
-    reserved_at = Column(DateTime, default=func.now())
+    reserved_at = Column(DateTime, server_default=func.current_timestamp())
     expires_at = Column(DateTime, nullable=False)
     released_at = Column(DateTime)
     
@@ -481,17 +500,21 @@ class ProductReservation(Base):
     location = relationship("Location")
 
 
+# =====================================================
+# ASIGNACIONES
+# =====================================================
+
 class UserLocationAssignment(Base):
     """Modelo de Asignación Usuario-Ubicación"""
     __tablename__ = "user_location_assignments"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
     role_at_location = Column(String(50), default='bodeguero', nullable=False)
     is_active = Column(Boolean, default=True)
-    assigned_at = Column(DateTime, default=func.now())
+    assigned_at = Column(DateTime, server_default=func.current_timestamp())
     
     __table_args__ = (
         UniqueConstraint('user_id', 'location_id', name='user_location_assignments_user_id_location_id_key'),
@@ -507,11 +530,11 @@ class AdminLocationAssignment(Base):
     __tablename__ = "admin_location_assignments"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     admin_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
     is_active = Column(Boolean, default=True)
-    assigned_at = Column(DateTime, default=func.now())
+    assigned_at = Column(DateTime, server_default=func.current_timestamp())
     assigned_by_user_id = Column(Integer, ForeignKey("users.id"))
     notes = Column(Text)
     
@@ -525,12 +548,16 @@ class AdminLocationAssignment(Base):
     assigned_by = relationship("User", foreign_keys=[assigned_by_user_id])
 
 
+# =====================================================
+# DEVOLUCIONES
+# =====================================================
+
 class ReturnRequest(Base):
     """Modelo de Solicitud de Devolución"""
     __tablename__ = "return_requests"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     original_transfer_id = Column(Integer, ForeignKey("transfer_requests.id"), nullable=False)
     requester_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     source_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
@@ -541,11 +568,12 @@ class ReturnRequest(Base):
     courier_id = Column(Integer, ForeignKey("users.id"))
     warehouse_keeper_id = Column(Integer, ForeignKey("users.id"))
     status = Column(String(50), default='pending')
-    requested_at = Column(DateTime, default=func.now())
+    requested_at = Column(DateTime, server_default=func.current_timestamp())
     completed_at = Column(DateTime)
     notes = Column(Text)
     
     # Relationships
+    original_transfer = relationship("TransferRequest", foreign_keys=[original_transfer_id])
     requester = relationship("User", foreign_keys=[requester_id])
     courier = relationship("User", foreign_keys=[courier_id])
     warehouse_keeper = relationship("User", foreign_keys=[warehouse_keeper_id])
@@ -558,13 +586,13 @@ class ReturnNotification(Base):
     __tablename__ = "return_notifications"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     transfer_request_id = Column(Integer, ForeignKey("transfer_requests.id"), nullable=False)
     returned_to_location = Column(String(255), nullable=False)
-    returned_at = Column(DateTime, default=func.now())
+    returned_at = Column(DateTime, server_default=func.current_timestamp())
     notes = Column(Text)
     read_by_requester = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=func.now())
+    created_at = Column(DateTime, server_default=func.current_timestamp())
     
     # Relationships
     transfer_request = relationship("TransferRequest")
@@ -575,18 +603,18 @@ class TransportIncident(Base):
     __tablename__ = "transport_incidents"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     transfer_request_id = Column(Integer, ForeignKey("transfer_requests.id"), nullable=False)
     courier_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     incident_type = Column(String(100), nullable=False)
     description = Column(Text, nullable=False)
-    reported_at = Column(DateTime, default=func.now())
+    reported_at = Column(DateTime, server_default=func.current_timestamp())
     resolved = Column(Boolean, default=False)
     resolution_notes = Column(Text)
     
     # Relationships
     transfer_request = relationship("TransferRequest")
-    courier = relationship("User")
+    courier = relationship("User", foreign_keys=[courier_id])
 
 
 # =====================================================
@@ -598,7 +626,7 @@ class CostConfiguration(Base):
     __tablename__ = "cost_configurations"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
     cost_type = Column(String(50), nullable=False)
     amount = Column(Numeric(10, 2), nullable=False)
@@ -608,12 +636,14 @@ class CostConfiguration(Base):
     start_date = Column(Date, nullable=False)
     end_date = Column(Date)
     created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime, default=func.now())
-    updated_at = Column(DateTime, default=func.now())
+    created_at = Column(DateTime, server_default=func.current_timestamp())
+    updated_at = Column(DateTime, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
     
     # Relationships
-    location = relationship("Location")
-    created_by = relationship("User", foreign_keys=[created_by_user_id])
+    location = relationship("Location", back_populates="cost_configurations")
+    created_by = relationship("User", foreign_keys=[created_by_user_id], back_populates="created_cost_configurations")
+    payments = relationship("CostPayment", back_populates="cost_configuration", cascade="all, delete-orphan")
+    exceptions = relationship("CostPaymentException", back_populates="cost_configuration", cascade="all, delete-orphan")
 
 
 class CostPayment(Base):
@@ -621,7 +651,7 @@ class CostPayment(Base):
     __tablename__ = "cost_payments"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     cost_configuration_id = Column(Integer, ForeignKey("cost_configurations.id"), nullable=False)
     due_date = Column(Date, nullable=False)
     payment_date = Column(Date, nullable=False)
@@ -630,11 +660,11 @@ class CostPayment(Base):
     payment_reference = Column(String(255))
     notes = Column(Text)
     paid_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime, default=func.now())
+    created_at = Column(DateTime, server_default=func.current_timestamp())
     
     # Relationships
-    cost_configuration = relationship("CostConfiguration")
-    paid_by = relationship("User")
+    cost_configuration = relationship("CostConfiguration", back_populates="payments")
+    paid_by = relationship("User", foreign_keys=[paid_by_user_id], back_populates="paid_cost_payments")
 
 
 class CostPaymentException(Base):
@@ -642,7 +672,7 @@ class CostPaymentException(Base):
     __tablename__ = "cost_payment_exceptions"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     cost_configuration_id = Column(Integer, ForeignKey("cost_configurations.id"), nullable=False)
     exception_date = Column(Date, nullable=False)
     exception_type = Column(String(20), nullable=False)
@@ -651,11 +681,11 @@ class CostPaymentException(Base):
     new_due_date = Column(Date)
     reason = Column(Text)
     created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime, default=func.now())
+    created_at = Column(DateTime, server_default=func.current_timestamp())
     
     # Relationships
-    cost_configuration = relationship("CostConfiguration")
-    created_by = relationship("User")
+    cost_configuration = relationship("CostConfiguration", back_populates="exceptions")
+    created_by = relationship("User", foreign_keys=[created_by_user_id], back_populates="created_cost_exceptions")
 
 
 class CostDeletionArchive(Base):
@@ -663,17 +693,17 @@ class CostDeletionArchive(Base):
     __tablename__ = "cost_deletion_archives"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     original_cost_id = Column(Integer, nullable=False)
     configuration_data = Column(JSONB, nullable=False)
     paid_payments_data = Column(JSONB)
     exceptions_data = Column(JSONB)
     deleted_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    deletion_date = Column(DateTime, default=func.now())
+    deletion_date = Column(DateTime, server_default=func.current_timestamp())
     deletion_reason = Column(String(100))
     
     # Relationships
-    deleted_by = relationship("User")
+    deleted_by = relationship("User", foreign_keys=[deleted_by_user_id], back_populates="deleted_cost_archives")
 
 
 # =====================================================
@@ -685,7 +715,7 @@ class VideoProcessingJob(Base):
     __tablename__ = "video_processing_jobs"
     
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)  # ✅ NUEVO
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     video_file_path = Column(String(500), nullable=False)
     original_filename = Column(String(255))
     file_size_bytes = Column(Integer)
@@ -706,7 +736,7 @@ class VideoProcessingJob(Base):
     processing_time_seconds = Column(Integer)
     microservice_job_id = Column(String(100))
     processed_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime, default=func.now())
+    created_at = Column(DateTime, server_default=func.current_timestamp())
     processing_started_at = Column(DateTime)
     processing_completed_at = Column(DateTime)
     error_message = Column(Text)
@@ -719,3 +749,50 @@ class VideoProcessingJob(Base):
     processed_by = relationship("User")
     created_product = relationship("Product")
     created_inventory_change = relationship("InventoryChange")
+
+
+# =====================================================
+# MAYOREO - ✅ TABLAS FALTANTES AGREGADAS
+# =====================================================
+
+class Mayoreo(Base):
+    """Modelo de Producto Mayoreo"""
+    __tablename__ = "mayoreo"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    modelo = Column(String(255), nullable=False)
+    foto = Column(Text)
+    tallas = Column(String(255))
+    cantidad_cajas_disponibles = Column(Integer, default=0, nullable=False)
+    pares_por_caja = Column(Integer, nullable=False)
+    precio = Column(Numeric(10, 2), nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, server_default=func.current_timestamp())
+    updated_at = Column(DateTime, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
+    
+    # Relationships
+    company = relationship("Company", back_populates="mayoreo_items")
+    user = relationship("User")
+    ventas = relationship("VentaMayoreo", back_populates="mayoreo")
+
+
+class VentaMayoreo(Base):
+    """Modelo de Venta de Mayoreo"""
+    __tablename__ = "venta_mayoreo"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    mayoreo_id = Column(Integer, ForeignKey("mayoreo.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    cantidad_cajas_vendidas = Column(Integer, nullable=False)
+    precio_unitario_venta = Column(Numeric(10, 2), nullable=False)
+    total_venta = Column(Numeric(12, 2), nullable=False)
+    fecha_venta = Column(DateTime, nullable=False, server_default=func.current_timestamp())
+    notas = Column(Text)
+    created_at = Column(DateTime, server_default=func.current_timestamp())
+    
+    # Relationships
+    mayoreo = relationship("Mayoreo", back_populates="ventas")
+    user = relationship("User")

@@ -30,7 +30,6 @@ class AuthService:
     
     @staticmethod
     def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-        """Crear token de acceso"""
         to_encode = data.copy()
         
         if expires_delta:
@@ -40,11 +39,10 @@ class AuthService:
         
         to_encode.update({"exp": expire})
 
-        if "company_id" not in to_encode:
+        if data.get("role") != "superadmin" and "company_id" not in to_encode:
             raise ValueError("company_id es requerido en el token")
 
         encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
-        
         return encoded_jwt
     
     @staticmethod

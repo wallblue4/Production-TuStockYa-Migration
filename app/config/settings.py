@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     cloudinary_api_secret: Optional[str] = None
     cloudinary_folder: str = "tustockya"
 
+    # Superadmin
+    install_secret_key: str = os.getenv("INSTALL_SECRET_KEY", "CHANGE_ME_IN_PRODUCTION_mirawoooooooo")
     
     # File Upload
     max_image_size: int = 10 * 1024 * 1024
