@@ -324,6 +324,105 @@ class CloudinaryService:
                 "message": f"Error conectando con Cloudinary: {str(e)}",
                 "configured": self.configured
             }
+    async def upload_receipt_image(
+        self, 
+        image_file: UploadFile,
+        receipt_type: str,  # "expense", "sale", etc.
+        user_id: int
+    ) -> str:
+        """
+        Subir imagen de comprobante a Cloudinary
+        
+        Args:
+            image_file: Archivo de imagen a subir
+            receipt_type: Tipo de comprobante ("expense", "sale")
+            user_id: ID del usuario que sube la imagen
+            
+        Returns:
+            str: URL segura de la imagen subida
+        """
+        if not self.configured:
+            raise HTTPException(
+                status_code=500,
+                detail="Cloudinary no está configurado correctamente"
+            )
+        
+        try:
+            # Validar tipo de archivo
+            if not image_file.content_type.startswith('image/'):
+                raise HTTPException(
+                    status_code=400,
+                    detail="El archivo debe ser una imagen válida"
+                )
+            
+            # Validar tamaño
+            if image_file.size and image_file.size > settings.max_image_size:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"La imagen no debe superar {settings.max_image_size // (1024*1024)}MB"
+                )
+            
+            # Generar identificador único
+            file_id = str(uuid.uuid4())[:8]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Generar public_id único
+            public_id = f"receipts/{receipt_type}_{user_id}_{timestamp}_{file_id}"
+            
+            # Leer contenido del archivo
+            await image_file.seek(0)
+            file_content = await image_file.read()
+            
+            logger.info(f"📤 Subiendo comprobante: {public_id}")
+            
+            # Subir a Cloudinary con optimizaciones
+            result = cloudinary.uploader.upload(
+                file_content,
+                public_id=public_id,
+                folder=f"{settings.cloudinary_folder}/receipts",
+                transformation=[
+                    {
+                        "width": 1200, 
+                        "height": 1600, 
+                        "crop": "limit",
+                        "quality": "auto:good",
+                        "format": "auto"
+                    }
+                ],
+                tags=[
+                    "receipt",
+                    receipt_type,
+                    f"user_{user_id}"
+                ],
+                context={
+                    "alt": f"Comprobante - {receipt_type}",
+                    "user_id": str(user_id),
+                    "receipt_type": receipt_type,
+                    "upload_source": f"{receipt_type}_module"
+                },
+                resource_type="image",
+                overwrite=False,
+                unique_filename=True,
+                use_filename=False
+            )
+            
+            # Verificar resultado exitoso
+            if 'secure_url' not in result:
+                raise Exception("Cloudinary no retornó URL válida")
+            
+            logger.info(f"✅ Comprobante subido: {result['secure_url']}")
+            logger.info(f"📊 Detalles: {result.get('bytes', 0)} bytes, {result.get('format', 'unknown')} format")
+            
+            return result["secure_url"]
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error subiendo comprobante: {str(e)}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Error subiendo imagen: {str(e)}"
+            )
 
 # ==================== INSTANCIA GLOBAL DEL SERVICIO ====================
 

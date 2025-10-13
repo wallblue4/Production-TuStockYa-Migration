@@ -1,5 +1,5 @@
 # app/shared/schemas/common.py
-from pydantic import BaseModel
+from pydantic import BaseModel , Field
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from decimal import Decimal
@@ -7,7 +7,7 @@ from decimal import Decimal
 class BaseResponse(BaseModel):
     success: bool
     message: str = ""
-    timestamp: datetime = datetime.now()
+    timestamp: datetime = Field(default_factory=datetime.now) 
 
 class ErrorResponse(BaseResponse):
     success: bool = False

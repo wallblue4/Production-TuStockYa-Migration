@@ -9,6 +9,7 @@ from app.modules.vendor.router import router as vendor_router
 from app.modules.transfers_new.router import router as transfers_router
 from app.modules.warehouse_new.router import router as warehouse_router 
 from app.modules.courier.router import router as courier_router
+from app.modules.inventory.router import router as inventory_router
 
 
 from app.modules.admin import admin_router
@@ -81,6 +82,12 @@ api_router.include_router(
     tags=["Courier Operations"]
 )
 
+api_router.include_router(
+    inventory_router,
+    prefix="/inventory",
+    tags=["Inventory Management"]
+)
+
 # ==================== ENDPOINTS RAÍZ ACTUALIZADOS ====================
 
 @api_router.get("/")
@@ -95,6 +102,7 @@ async def api_root():
             "authentication": "/api/v1/auth",
             "sales": "/api/v1/vendor/sales ✅ IMPLEMENTADO",
             "transfers": "/api/v1/transfers ✅ IMPLEMENTADO", # ✅ ACTUALIZADO
+            "inventory": "/api/v1/inventory ✅ IMPLEMENTADO", # ✅ NUEVO
             "warehouse": "/api/v1/warehouse (próximamente)",
             "logistics": "/api/v1/logistics (próximamente)"
         },
@@ -102,6 +110,7 @@ async def api_root():
             "auth": "✅ Active - Login, JWT, permissions",
             "sales": "✅ Active - 16 endpoints del vendedor",
             "transfers": "✅ Active - Funcionalidades de transferencias", # ✅ NUEVO
+            "inventory": "✅ Active - Consulta de inventario por rol", # ✅ NUEVO
             "warehouse": "⏳ Pending - Funcionalidades bodeguero",
             "courier": "⏳ Pending - Funcionalidades corredor",
             "admin": "⏳ Pending - Funcionalidades administrador"
@@ -142,6 +151,15 @@ async def health_check():
                     "VE006 - Procesar devoluciones",
                     "VE008 - Confirmar recepción"
                 ]
+            },
+            "inventory": { # ✅ NUEVO
+                "status": "active",
+                "endpoints_count": "3+",
+                "features": [
+                    "Consulta general de inventario",
+                    "Inventario para bodegueros",
+                    "Inventario para administradores"
+                ]
             }
         }
     }
@@ -180,6 +198,18 @@ async def list_modules():
                     "VE008 - Confirmar recepción"
                 ],
                 "status": "implemented" # ✅ ACTUALIZADO
+            },
+            {
+                "name": "inventory",
+                "prefix": "/inventory",
+                "description": "Gestión de inventario por roles",
+                "features": [
+                    "Consulta general de inventario",
+                    "Inventario para bodegueros (solo bodegas)",
+                    "Inventario para administradores (locales y bodegas)",
+                    "Filtros avanzados por marca, modelo, talla"
+                ],
+                "status": "implemented" # ✅ NUEVO
             },
             {
                 "name": "warehouse",
@@ -260,5 +290,44 @@ async def test_transfers_module():
             "bodeguero@tustockya.com / bodeguero123",
             "admin@tustockya.com / admin123"
         ]
+    }
+
+@api_router.get("/dev/test-inventory")
+async def test_inventory_module():
+    """
+    Endpoint para testear el módulo de inventario
+    """
+    return {
+        "module": "inventory",
+        "test_status": "ready",
+        "test_endpoints": [
+            "GET /api/v1/inventory/products/search - Búsqueda general de inventario",
+            "GET /api/v1/inventory/warehouse-keeper/inventory - Inventario para bodegueros (con filtros)",
+            "GET /api/v1/inventory/warehouse-keeper/inventory/all - TODO el inventario para bodegueros (estructura simplificada)",
+            "GET /api/v1/inventory/admin/inventory - Inventario para administradores (con filtros)",
+            "GET /api/v1/inventory/admin/inventory/all - TODO el inventario para administradores (estructura simplificada)",
+            "GET /api/v1/inventory/health - Health check del módulo"
+        ],
+        "auth_required": True,
+        "roles_allowed": ["seller", "admin", "warehouse"],
+        "test_users": [
+            "vendedor@tustockya.com / vendedor123",
+            "bodeguero@tustockya.com / bodeguero123",
+            "admin@tustockya.com / admin123"
+        ],
+        "test_parameters": {
+            "filters": [
+                "reference_code - Código de referencia del producto",
+                "brand - Marca del producto",
+                "model - Modelo del producto",
+                "size - Talla del producto",
+                "is_active - Estado activo (0 o 1)"
+            ],
+            "role_specific": {
+                "warehouse_keeper": "Solo ve inventario de bodegas asignadas",
+                "admin": "Ve inventario de locales y bodegas asignadas",
+                "seller": "Acceso general con filtros"
+            }
+        }
     }
 
