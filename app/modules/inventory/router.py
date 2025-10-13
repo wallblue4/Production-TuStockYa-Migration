@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from app.config.database import get_db
-from app.core.auth.dependencies import require_roles
+from app.core.auth.dependencies import require_roles, get_current_company_id
 from .service import InventoryService
 from .schemas import ProductResponse, InventorySearchParams, InventoryByRoleParams, GroupedInventoryResponse, SimpleInventoryResponse
 
@@ -18,10 +18,11 @@ async def search_inventory(
     size: Optional[str] = None,
     is_active: Optional[int] = None,
     current_user = Depends(require_roles(["seller", "administrador", "bodeguero"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """Buscar productos en inventario con múltiples filtros"""
-    service = InventoryService(db)
+    service = InventoryService(db, current_company_id)
     search_params = InventorySearchParams(
         reference_code=reference_code,
         brand=brand,

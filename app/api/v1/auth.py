@@ -57,7 +57,8 @@ async def login(
         data={
             "user_id": user.id,
             "email": user.email,
-            "role": user.role
+            "role": user.role,
+            "company_id": user.company_id
         }
     )
     
@@ -75,8 +76,11 @@ async def login(
             first_name=user.first_name,
             last_name=user.last_name,
             role=user.role,
+            company_id=user.company_id,
             location_id=user.location_id,
             location_name=location_name,
+            company_name=user.company.name,
+            company_subdomain=user.company.subdomain,
             is_active=user.is_active
         )
     )

@@ -39,6 +39,10 @@ class AuthService:
             expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
         
         to_encode.update({"exp": expire})
+
+        if "company_id" not in to_encode:
+            raise ValueError("company_id es requerido en el token")
+
         encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
         
         return encoded_jwt

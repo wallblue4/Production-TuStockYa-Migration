@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from app.config.database import get_db
-from app.shared.database.models import User
+from app.shared.database.models import User, Company
 from app.core.auth.service import AuthService
 
 security = HTTPBearer()
@@ -37,13 +37,17 @@ async def get_current_user(
     
     # Obtener user_id del payload
     user_id: int = payload.get("user_id")
-    if user_id is None:
-        raise AuthenticationError("Payload del token inválido")
+    company_id: int = payload.get("company_id")
+
+    if user_id is None or company_id is None:
+        raise AuthenticationError("Payload del token inválido - faltan user_id o company_id")
     
     # Buscar usuario en base de datos con relaciones
     user = (
         db.query(User)
+        .join(User.company)  # ✅ NUEVO: Join con company
         .filter(User.id == user_id)
+        .filter(User.company_id == company_id)  # ✅ NUEVO: Validar company_id
         .first()
     )
     
@@ -52,6 +56,9 @@ async def get_current_user(
     
     if not user.is_active:
         raise AuthenticationError("Usuario inactivo")
+
+    if not user.company.is_active: 
+        raise AuthenticationError("Empresa inactiva")
     
     return user
 
@@ -120,3 +127,17 @@ def verify_location_access(location_id: int):
             )
         return current_user
     return location_checker
+
+async def get_current_company_id(
+    current_user: User = Depends(get_current_user)
+) -> int:
+    """Obtener company_id del usuario actual"""
+    return current_user.company_id
+
+
+async def get_current_company(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Company:
+    """Obtener empresa completa del usuario actual"""
+    return current_user.company

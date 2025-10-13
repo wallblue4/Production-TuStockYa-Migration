@@ -22,9 +22,13 @@ class UserResponse(BaseModel):
     first_name: str
     last_name: str
     role: str
+    company_id: int
     location_id: Optional[int] = None
     location_name: Optional[str] = None
     is_active: bool
+
+    company_name: Optional[str] = None
+    company_subdomain: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -35,6 +39,7 @@ class UserResponse(BaseModel):
                 "first_name": "Juan",
                 "last_name": "Pérez",
                 "role": "seller",
+                "company_id": 1,
                 "location_id": 1,
                 "location_name": "Local Principal",
                 "is_active": True
@@ -70,6 +75,7 @@ class TokenPayload(BaseModel):
     user_id: int
     email: str
     role: str
+    company_id: int
     exp: Optional[datetime] = None
 
 class ChangePasswordRequest(BaseModel):
