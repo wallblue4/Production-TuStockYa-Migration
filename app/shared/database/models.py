@@ -186,7 +186,11 @@ class Location(Base):
     
     # Relationships
     company = relationship("Company", back_populates="locations")
-    users = relationship("User", back_populates="location")
+    users = relationship(
+        "User", 
+        back_populates="location",
+        foreign_keys="[User.location_id]"  
+    )
     expenses = relationship("Expense", back_populates="location")
     sales = relationship("Sale", back_populates="location")
     cost_configurations = relationship("CostConfiguration", back_populates="location")
@@ -218,7 +222,11 @@ class User(Base):
     
     # Relationships
     company = relationship("Company", back_populates="users", foreign_keys=[company_id])
-    location = relationship("Location", back_populates="users")
+    location = relationship(
+        "Location", 
+        back_populates="users",
+        foreign_keys=[location_id]  # Especifica la FK
+    )
     sales = relationship("Sale", back_populates="seller", foreign_keys="Sale.seller_id")
     expenses = relationship("Expense", back_populates="user")
     location_assignments = relationship("UserLocationAssignment", back_populates="user")

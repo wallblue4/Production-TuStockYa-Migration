@@ -147,7 +147,7 @@ class AdminRepository:
         admin = self.db.query(User).filter(User.id == admin_id, User.company_id == company_id).first()
         if admin and admin.role == "boss":
             return self.db.query(User)\
-                .filter(User.role.in_(["vendedor", "bodeguero", "corredor", "administrador"]))\
+                .filter(User.role.in_(["seller", "bodeguero", "corredor", "administrador"]))\
                 .filter(User.is_active == True, User.company_id == company_id)\
                 .order_by(User.created_at.desc())\
                 .all()
@@ -166,7 +166,7 @@ class AdminRepository:
                 UserLocationAssignment.location_id.in_(managed_location_ids),
                 UserLocationAssignment.is_active == True,
                 UserLocationAssignment.company_id == company_id,
-                User.role.in_(["vendedor", "bodeguero", "corredor"]),
+                User.role.in_(["seller", "bodeguero", "corredor"]),
                 User.company_id == company_id
             )\
             .distinct()\

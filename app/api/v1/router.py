@@ -11,7 +11,8 @@ from app.modules.warehouse_new.router import router as warehouse_router
 from app.modules.courier.router import router as courier_router
 from app.modules.inventory.router import router as inventory_router
 from app.modules.mayoreo.router import router as mayoreo_router
-
+from app.modules.superadmin.router import router as superadmin_router
+from app.modules.boss.router import router as boss_router
 
 from app.modules.admin import admin_router
 
@@ -33,6 +34,12 @@ api_router.include_router(
     admin_router,
     prefix="/admin",
     tags=["Admin - Administrador"]
+)
+
+api_router.include_router(
+    boss_router,
+    prefix="/boss",
+    tags=["Boss - Director Ejecutivo"]
 )
 
 api_router.include_router(
@@ -95,6 +102,12 @@ api_router.include_router(
     tags=["Mayoreo Management"]
 )
 
+api_router.include_router(
+    superadmin_router,
+    prefix="/superadmin",
+    tags=["Superadmin - Superadministrador"]
+)
+
 # ==================== ENDPOINTS RAÍZ ACTUALIZADOS ====================
 
 @api_router.get("/")
@@ -122,7 +135,8 @@ async def api_root():
             "mayoreo": "✅ Active - CRUD mayoreo y ventas (Solo admin)", # ✅ NUEVO
             "warehouse": "⏳ Pending - Funcionalidades bodeguero",
             "courier": "⏳ Pending - Funcionalidades corredor",
-            "admin": "⏳ Pending - Funcionalidades administrador"
+            "admin": "⏳ Pending - Funcionalidades administrador",
+            "superadmin": "⏳ Pending - Funcionalidades superadministrador"
         }
     }
 
@@ -179,6 +193,18 @@ async def health_check():
                     "Búsqueda y filtros avanzados",
                     "Estadísticas y reportes",
                     "Validación automática de stock"
+                ]
+            },
+            "superadmin": { # ✅ NUEVO
+                "status": "active",
+                "endpoints_count": "10+",
+                "features": [
+                    "SU001 - Gestión de empresas",
+                    "SU002 - Gestión de suscripciones y facturación",
+                    "SU003 - Métricas globales",
+                    "SU004 - Notificaciones (en desarrollo)",
+                    "SU005 - Suspender/activar servicios",
+                    "SU006 - Reportes financieros (en desarrollo)"
                 ]
             }
         }
