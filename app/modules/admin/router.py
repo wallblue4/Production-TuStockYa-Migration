@@ -1137,7 +1137,7 @@ async def get_admin_assignments(
     if current_user.role == "boss":
         if admin_id:
             # BOSS viendo asignaciones de un administrador específico
-            admin = db.query(User).filter(User.id == admin_id).first()
+            admin = db.query(User).filter(User.id == admin_id, User.company_id == current_company_id).first()
             if not admin:
                 raise HTTPException(status_code=404, detail="Administrador no encontrado")
             return await service.get_admin_assignments(admin)
@@ -1209,7 +1209,9 @@ async def can_manage_location(
         .filter(
             AdminLocationAssignment.admin_id == current_user.id,
             AdminLocationAssignment.location_id == location_id,
-            AdminLocationAssignment.is_active == True
+            AdminLocationAssignment.is_active == True,
+            AdminLocationAssignment.company_id == current_company_id
+
         ).first()
     
     return {
@@ -1230,7 +1232,8 @@ async def get_available_administrators(
     admins = db.query(User)\
         .filter(
             User.role == "administrador",
-            User.is_active == True
+            User.is_active == True,
+            User.company_id == current_company_id
         )\
         .order_by(User.first_name, User.last_name)\
         .all()
@@ -1246,7 +1249,8 @@ async def get_available_administrators(
             location_id=admin.location_id,
             location_name=admin.location.name if admin.location else None,
             is_active=admin.is_active,
-            created_at=admin.created_at
+            created_at=admin.created_at,
+            created_by_superadmin_id=admin.created_by
         ) for admin in admins
     ]
 
@@ -1262,12 +1266,13 @@ async def get_unassigned_locations(
     
     # Ubicaciones sin asignaciones activas
     assigned_location_ids = db.query(AdminLocationAssignment.location_id)\
-        .filter(AdminLocationAssignment.is_active == True)\
+        .filter(AdminLocationAssignment.is_active == True, AdminLocationAssignment.company_id == current_company_id)\
         .subquery()
     
     unassigned_locations = db.query(Location)\
         .filter(
             Location.is_active == True,
+            Location.company_id == current_company_id,
             ~Location.id.in_(assigned_location_ids)
         )\
         .order_by(Location.name)\

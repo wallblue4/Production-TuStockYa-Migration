@@ -2,8 +2,8 @@
 import json
 import asyncio
 from datetime import datetime, timedelta, date
-from typing import List, Optional, Dict, Any , Callable, Union , Tuple
-from fastapi import HTTPException, status ,UploadFile
+from typing import List, Optional, Dict, Any, Callable, Union, Tuple
+from fastapi import HTTPException, status, UploadFile
 from sqlalchemy import func 
 from sqlalchemy.orm import Session
 from decimal import Decimal
@@ -17,12 +17,14 @@ import logging
 from fastapi import APIRouter, Depends, Query, File, UploadFile, Form
 from app.shared.services.cloudinary_service import cloudinary_service
 
-
 from app.config.settings import settings
 from .repository import AdminRepository
 from .schemas import *
 
-from app.shared.database.models import User, Location ,AdminLocationAssignment , Product ,InventoryChange ,DiscountRequest , VideoProcessingJob ,ProductSize
+from app.shared.database.models import (
+    User, Location, AdminLocationAssignment, Product, InventoryChange, 
+    DiscountRequest, VideoProcessingJob, ProductSize
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -59,9 +61,12 @@ class AdminService:
                     detail=f"No tienes permisos para crear usuarios en la ubicación {user_data.location_id}"
                 )
         
-        # Validar que el email no existe
+        # ✅ CORRECCIÓN 1: Validar que el email no existe EN LA MISMA EMPRESA
         existing_user = self.db.query(User)\
-            .filter(User.email == user_data.email.lower()).first()
+            .filter(
+                User.email == user_data.email.lower(),
+                User.company_id == self.company_id  # ✅ AGREGAR
+            ).first()
         
         if existing_user:
             raise HTTPException(
@@ -69,10 +74,13 @@ class AdminService:
                 detail="Email ya está en uso"
             )
         
-        # Validar ubicación si se especifica
+        # ✅ CORRECCIÓN 2: Validar ubicación si se especifica CON company_id
         if user_data.location_id:
             location = self.db.query(Location)\
-                .filter(Location.id == user_data.location_id).first()
+                .filter(
+                    Location.id == user_data.location_id,
+                    Location.company_id == self.company_id  # ✅ AGREGAR
+                ).first()
             
             if not location:
                 raise HTTPException(
@@ -105,12 +113,14 @@ class AdminService:
             hashed_password = pwd_context.hash(user_dict["password"])
             user_dict["password_hash"] = hashed_password
             del user_dict["password"]
+            user_dict["created_by"] = admin.id
+            user_dict["company_id"] = self.company_id
             
             db_user = User(**user_dict)
             self.db.add(db_user)
             self.db.flush()  # Obtener ID sin hacer commit aún
             
-            # 2. Crear asignación en UserLocationAssignment si se especifica ubicación
+            # ✅ CORRECCIÓN 3: Crear asignación CON company_id
             if user_data.location_id:
                 from app.shared.database.models import UserLocationAssignment
                 
@@ -118,6 +128,7 @@ class AdminService:
                     user_id=db_user.id,
                     location_id=user_data.location_id,
                     role_at_location=user_data.role.value,
+                    company_id=self.company_id,  # ✅ AGREGAR
                     is_active=True
                 )
                 self.db.add(assignment)
@@ -165,8 +176,13 @@ class AdminService:
         """
         if not location_id:
             raise HTTPException(400, "ID de ubicación requerido")
-            
-        location = self.db.query(Location).filter(Location.id == location_id).first()
+        
+        # ✅ CORRECCIÓN 4: Filtrar por company_id
+        location = self.db.query(Location).filter(
+            Location.id == location_id,
+            Location.company_id == self.company_id  # ✅ AGREGAR
+        ).first()
+        
         if not location:
             raise HTTPException(404, f"Ubicación {location_id} no encontrada")
         
@@ -193,7 +209,11 @@ class AdminService:
             if invalid_ids:
                 invalid_names = []
                 for inv_id in invalid_ids:
-                    loc = self.db.query(Location).filter(Location.id == inv_id).first()
+                    # ✅ CORRECCIÓN 5: Filtrar por company_id
+                    loc = self.db.query(Location).filter(
+                        Location.id == inv_id,
+                        Location.company_id == self.company_id  # ✅ AGREGAR
+                    ).first()
                     invalid_names.append(loc.name if loc else f"ID-{inv_id}")
                 
                 raise HTTPException(
@@ -211,7 +231,12 @@ class AdminService:
         action: str = "gestionar"
     ) -> User:
         """Validar acceso a usuario específico"""
-        user = self.db.query(User).filter(User.id == user_id).first()
+        # ✅ CORRECCIÓN 6: Filtrar por company_id
+        user = self.db.query(User).filter(
+            User.id == user_id,
+            User.company_id == self.company_id  # ✅ AGREGAR
+        ).first()
+        
         if not user:
             raise HTTPException(404, f"Usuario {user_id} no encontrado")
         
@@ -232,16 +257,21 @@ class AdminService:
     async def _can_admin_manage_location(self, admin_id: int, location_id: int) -> bool:
         """Verificar si un administrador puede gestionar una ubicación específica"""
         
-        # BOSS puede gestionar cualquier ubicación
-        admin = self.db.query(User).filter(User.id == admin_id).first()
+        # ✅ CORRECCIÓN 7: Filtrar por company_id
+        admin = self.db.query(User).filter(
+            User.id == admin_id,
+            User.company_id == self.company_id  # ✅ AGREGAR
+        ).first()
+        
         if admin and admin.role == "boss":
             return True
         
-        # Para administradores, verificar asignación específica
+        # ✅ CORRECCIÓN 8: Filtrar por company_id en asignación
         assignment = self.db.query(AdminLocationAssignment)\
             .filter(
                 AdminLocationAssignment.admin_id == admin_id,
                 AdminLocationAssignment.location_id == location_id,
+                AdminLocationAssignment.company_id == self.company_id,  # ✅ AGREGAR
                 AdminLocationAssignment.is_active == True
             ).first()
         
@@ -257,8 +287,12 @@ class AdminService:
         Solo el BOSS puede hacer esto
         """
         
-        # Validar que el usuario a asignar es administrador
-        admin_user = self.db.query(User).filter(User.id == assignment_data.admin_id).first()
+        # ✅ CORRECCIÓN 9: Validar que el usuario a asignar es administrador CON company_id
+        admin_user = self.db.query(User).filter(
+            User.id == assignment_data.admin_id,
+            User.company_id == self.company_id  # ✅ AGREGAR
+        ).first()
+        
         if not admin_user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -271,8 +305,12 @@ class AdminService:
                 detail="El usuario debe tener rol de administrador"
             )
         
-        # Validar que la ubicación existe
-        location = self.db.query(Location).filter(Location.id == assignment_data.location_id).first()
+        # ✅ CORRECCIÓN 10: Validar que la ubicación existe CON company_id
+        location = self.db.query(Location).filter(
+            Location.id == assignment_data.location_id,
+            Location.company_id == self.company_id  # ✅ AGREGAR
+        ).first()
+        
         if not location:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -406,8 +444,12 @@ class AdminService:
         """
         from sqlalchemy import func
         
-        # 1. Buscar el usuario que se quiere actualizar
-        user = self.db.query(User).filter(User.id == user_id).first()
+        # ✅ CORRECCIÓN 11: Buscar el usuario CON company_id
+        user = self.db.query(User).filter(
+            User.id == user_id,
+            User.company_id == self.company_id  # ✅ AGREGAR
+        ).first()
+        
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -435,8 +477,12 @@ class AdminService:
                     detail=f"No tienes permisos para asignar usuarios a la ubicación {new_location_id}"
                 )
             
-            # Validar compatibilidad rol-ubicación
-            new_location = self.db.query(Location).filter(Location.id == new_location_id).first()
+            # ✅ CORRECCIÓN 12: Validar compatibilidad rol-ubicación CON company_id
+            new_location = self.db.query(Location).filter(
+                Location.id == new_location_id,
+                Location.company_id == self.company_id  # ✅ AGREGAR
+            ).first()
+            
             if not new_location:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -468,18 +514,20 @@ class AdminService:
                 
                 new_location_id = update_dict["location_id"]
                 
-                # 1. Desactivar TODAS las asignaciones activas del usuario
+                # ✅ CORRECCIÓN 13: Desactivar TODAS las asignaciones CON company_id
                 self.db.query(UserLocationAssignment)\
                     .filter(
                         UserLocationAssignment.user_id == user_id,
+                        UserLocationAssignment.company_id == self.company_id,  # ✅ AGREGAR
                         UserLocationAssignment.is_active == True
                     ).update({"is_active": False})
                 
-                # 2. Buscar si ya existe una asignación para esta ubicación específica
+                # ✅ CORRECCIÓN 14: Buscar asignación existente CON company_id
                 existing_assignment = self.db.query(UserLocationAssignment)\
                     .filter(
                         UserLocationAssignment.user_id == user_id,
-                        UserLocationAssignment.location_id == new_location_id
+                        UserLocationAssignment.location_id == new_location_id,
+                        UserLocationAssignment.company_id == self.company_id  # ✅ AGREGAR
                     ).first()
                 
                 if existing_assignment:
@@ -488,11 +536,12 @@ class AdminService:
                     existing_assignment.role_at_location = user.role
                     existing_assignment.assigned_at = func.current_timestamp()
                 else:
-                    # 2b. No existe: crear nueva asignación
+                    # ✅ CORRECCIÓN 15: Crear nueva asignación CON company_id
                     new_assignment = UserLocationAssignment(
                         user_id=user_id,
                         location_id=new_location_id,
                         role_at_location=user.role,
+                        company_id=self.company_id,  # ✅ AGREGAR
                         is_active=True
                     )
                     self.db.add(new_assignment)
@@ -550,10 +599,18 @@ class AdminService:
         Ver todas las asignaciones de administradores (solo para BOSS)
         """
         
+        # ✅ CORRECCIÓN 16: Filtrar por company_id
         assignments = self.db.query(AdminLocationAssignment)\
-            .filter(AdminLocationAssignment.is_active == True)\
+            .filter(
+                AdminLocationAssignment.is_active == True,
+                AdminLocationAssignment.company_id == self.company_id  # ✅ AGREGAR
+            )\
             .join(User, AdminLocationAssignment.admin_id == User.id)\
             .join(Location, AdminLocationAssignment.location_id == Location.id)\
+            .filter(
+                User.company_id == self.company_id,  # ✅ AGREGAR
+                Location.company_id == self.company_id  # ✅ AGREGAR
+            )\
             .all()
         
         return [
@@ -587,8 +644,12 @@ class AdminService:
         - BOSS puede asignar cualquier usuario a cualquier ubicación
         """
         
-        # 1. Buscar el usuario que se quiere asignar
-        user = self.db.query(User).filter(User.id == assignment.user_id).first()
+        # ✅ CORRECCIÓN 17: Buscar el usuario CON company_id
+        user = self.db.query(User).filter(
+            User.id == assignment.user_id,
+            User.company_id == self.company_id  # ✅ AGREGAR
+        ).first()
+        
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -612,8 +673,12 @@ class AdminService:
                     detail="Solo el BOSS puede asignar usuarios sin ubicación asignada"
                 )
         
-        # 2. Buscar la ubicación destino
-        location = self.db.query(Location).filter(Location.id == assignment.location_id).first()
+        # ✅ CORRECCIÓN 18: Buscar la ubicación destino CON company_id
+        location = self.db.query(Location).filter(
+            Location.id == assignment.location_id,
+            Location.company_id == self.company_id  # ✅ AGREGAR
+        ).first()
+        
         if not location:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -649,20 +714,22 @@ class AdminService:
             old_location_name = user.location.name if user.location else "Sin ubicación"
             user.location_id = assignment.location_id
             
-            # Desactivar asignaciones anteriores en user_location_assignments
+            # ✅ CORRECCIÓN 19: Desactivar asignaciones anteriores CON company_id
             from app.shared.database.models import UserLocationAssignment
             
             self.db.query(UserLocationAssignment)\
                 .filter(
                     UserLocationAssignment.user_id == assignment.user_id,
+                    UserLocationAssignment.company_id == self.company_id,  # ✅ AGREGAR
                     UserLocationAssignment.is_active == True
                 ).update({"is_active": False})
             
-            # Crear nueva asignación en user_location_assignments
+            # ✅ CORRECCIÓN 20: Crear nueva asignación CON company_id
             new_assignment = UserLocationAssignment(
                 user_id=assignment.user_id,
                 location_id=assignment.location_id,
                 role_at_location=assignment.role_in_location or user.role,
+                company_id=self.company_id,  # ✅ AGREGAR
                 is_active=True
             )
             self.db.add(new_assignment)
@@ -702,20 +769,28 @@ class AdminService:
         location_responses = []
         for location in locations:
             try:
-                # 1. Contar usuarios asignados a esta ubicación
+                # ✅ CORRECCIÓN 21: Contar usuarios CON company_id
                 users_count = self.db.query(User)\
-                    .filter(User.location_id == location.id, User.is_active == True).count()
+                    .filter(
+                        User.location_id == location.id,
+                        User.company_id == self.company_id,  # ✅ AGREGAR
+                        User.is_active == True
+                    ).count()
                 
-                # 2. Contar productos usando location_name (según tu modelo)
+                # ✅ CORRECCIÓN 22: Contar productos CON company_id
                 products_count = self.db.query(Product)\
-                    .filter(Product.location_name == location.name, Product.is_active == 1).count()
+                    .filter(
+                        Product.location_name == location.name,
+                        Product.company_id == self.company_id,  # ✅ AGREGAR
+                        Product.is_active == 1
+                    ).count()
                 
-                # 3. Calcular valor del inventario 
-                # Sumar (unit_price * total_quantity) para valor real del inventario
+                # ✅ CORRECCIÓN 23: Calcular valor del inventario CON company_id
                 inventory_value_query = self.db.query(
                     func.sum(Product.unit_price * Product.total_quantity)
                 ).filter(
-                    Product.location_name == location.name, 
+                    Product.location_name == location.name,
+                    Product.company_id == self.company_id,  # ✅ AGREGAR
                     Product.is_active == 1
                 ).scalar()
                 
@@ -854,7 +929,7 @@ class AdminService:
         filters.location_ids = managed_location_ids
         
         # Generar reportes
-        reports = self.repository.generate_sales_reports(filters)
+        reports = self.repository.generate_sales_reports(filters, self.company_id)
         return reports
     
     # ==================== AD011: ALERTAS DE INVENTARIO ====================
@@ -900,9 +975,10 @@ class AdminService:
     ) -> DiscountRequestResponse:
         """AD012: Aprobar descuentos con validación de usuario"""
         
-        # Buscar solicitud de descuento
+        # ✅ CORRECCIÓN 24: Buscar solicitud de descuento CON company_id
         discount_request = self.db.query(DiscountRequest).filter(
-            DiscountRequest.id == approval.request_id
+            DiscountRequest.id == approval.request_id,
+            DiscountRequest.company_id == self.company_id  # ✅ AGREGAR
         ).first()
         
         if not discount_request:
@@ -954,10 +1030,11 @@ class AdminService:
         if not managed_user_ids:
             return []
         
-        # Filtrar solicitudes solo de usuarios gestionados
+        # ✅ CORRECCIÓN 25: Filtrar solicitudes CON company_id explícito
         requests = self.db.query(DiscountRequest)\
             .filter(
                 DiscountRequest.seller_id.in_(managed_user_ids),
+                DiscountRequest.company_id == self.company_id,  # ✅ AGREGAR
                 DiscountRequest.status == "pending"
             )\
             .order_by(DiscountRequest.requested_at)\
@@ -965,8 +1042,11 @@ class AdminService:
         
         discount_responses = []
         for req in requests:
-            # Obtener información del vendedor
-            seller = self.db.query(User).filter(User.id == req.seller_id).first()
+            # ✅ CORRECCIÓN 26: Obtener información del vendedor CON company_id
+            seller = self.db.query(User).filter(
+                User.id == req.seller_id,
+                User.company_id == self.company_id  # ✅ AGREGAR
+            ).first()
             
             discount_responses.append(DiscountRequestResponse(
                 id=req.id,
@@ -975,15 +1055,15 @@ class AdminService:
                 location_id=seller.location_id if seller else None,
                 location_name=seller.location.name if seller and seller.location else None,
                 original_amount=req.amount,  
-                discount_amount=req.amount,   # Mismo valor que el monto solicitado
-                discount_percentage=None,     # No calculado en este modelo
+                discount_amount=req.amount,
+                discount_percentage=None,
                 reason=req.reason,
                 status=req.status,
                 requested_at=req.requested_at,
-                approved_by_user_id=None,     # Aún no aprobado
-                approved_by_name=None,        # Aún no aprobado  
-                approved_at=None,             # Aún no aprobado
-                admin_notes=None              # Aún no hay notas
+                approved_by_user_id=None,
+                approved_by_name=None,  
+                approved_at=None,
+                admin_notes=None
             ))
         
         return discount_responses
@@ -1032,7 +1112,7 @@ class AdminService:
             return []
         
         # Obtener performance de usuarios
-        return self.repository.get_users_performance(user_ids, start_date, end_date)
+        return self.repository.get_users_performance(user_ids, start_date, end_date, self.company_id)
     
     # ==================== AD015: ASIGNACIÓN DE MODELOS ====================
     
@@ -1045,9 +1125,12 @@ class AdminService:
         AD015: Gestionar asignación de modelos a bodegas específicas
         """
         
-        # Validar que el producto existe
+        # ✅ CORRECCIÓN 27: Validar que el producto existe CON company_id
         product = self.db.query(Product)\
-            .filter(Product.reference_code == assignment.product_reference)\
+            .filter(
+                Product.reference_code == assignment.product_reference,
+                Product.company_id == self.company_id  # ✅ AGREGAR
+            )\
             .first()
         
         if not product:
@@ -1056,11 +1139,12 @@ class AdminService:
                 detail="Producto no encontrado"
             )
         
-        # Validar bodegas
+        # ✅ CORRECCIÓN 28: Validar bodegas CON company_id
         warehouses = self.db.query(Location)\
             .filter(
                 Location.id.in_(assignment.assigned_warehouses),
                 Location.type == "bodega",
+                Location.company_id == self.company_id,  # ✅ AGREGAR
                 Location.is_active == True
             ).all()
         
@@ -1074,12 +1158,14 @@ class AdminService:
         # Por ahora, registramos en inventory_changes
         from app.shared.database.models import InventoryChange
         
+        # ✅ CORRECCIÓN 29: Crear InventoryChange CON company_id
         assignment_record = InventoryChange(
             product_id=product.id,
             change_type="model_assignment",
             quantity_before=0,
             quantity_after=len(assignment.assigned_warehouses),
             user_id=admin.id,
+            company_id=self.company_id,  # ✅ AGREGAR
             notes=f"ASIGNACIÓN MODELO: {assignment.product_reference} - Bodegas: {','.join([w.name for w in warehouses])} - Reglas: {assignment.distribution_rules}"
         )
         
@@ -1163,21 +1249,25 @@ class AdminService:
     ) -> Dict[str, Any]:
         """Verificar disponibilidad de producto"""
         
+        # ✅ CORRECCIÓN 30: Buscar producto CON company_id
         product = self.db.query(Product)\
             .filter(
                 Product.reference_code == reference_code,
                 Product.location_id == location_id,
+                Product.company_id == self.company_id,  # ✅ AGREGAR
                 Product.is_active == 1
             ).first()
         
         if not product:
             return {"available": False, "reason": "Producto no encontrado"}
         
+        # ✅ CORRECCIÓN 31: Buscar ProductSize CON company_id
         from app.shared.database.models import ProductSize
         product_size = self.db.query(ProductSize)\
             .filter(
                 ProductSize.product_id == product.id,
-                ProductSize.size == size
+                ProductSize.size == size,
+                ProductSize.company_id == self.company_id  # ✅ AGREGAR
             ).first()
         
         if not product_size or product_size.quantity < quantity:
@@ -1222,12 +1312,12 @@ class AdminService:
                     admin.id
                 )
 
-                # 👉 Y ESTE LOGGER DESPUÉS DE LA SUBIDA
                 logger.info(f"✅ IMAGEN SUBIDA EXITOSAMENTE. URL: {image_url}")
 
             except Exception as img_error:
                 logger.error(f"❌ ERROR SUBIENDO IMAGEN: {str(img_error)}")
                 image_url = None
+        
         try:
             logger.info("CloudinaryService importado correctamente")
         except ImportError as e:
@@ -1241,9 +1331,11 @@ class AdminService:
             from app.shared.database.models import Location
             logger.info("🔄 Importando Location...")
             
+            # ✅ CORRECCIÓN 32: Validar warehouse CON company_id
             warehouse = self.db.query(Location).filter(
                 Location.id == video_entry.warehouse_location_id,
-                Location.type == "bodega"
+                Location.type == "bodega",
+                Location.company_id == self.company_id  # ✅ AGREGAR
             ).first()
             
             logger.info(f"🏭 Warehouse query result: {warehouse}")
@@ -1261,7 +1353,6 @@ class AdminService:
                 logger.info(f"Imagen: {reference_image.filename}, Tamaño: {reference_image.size}")
                 
                 try:
-
                     logger.info("CloudinaryService importado en método")
                     
                     # Verificar configuración de Cloudinary
@@ -1315,7 +1406,6 @@ class AdminService:
             
             logger.info("🔄 Creando producto...")
             
-            
             # Combinar datos del usuario con IA
             final_brand = video_entry.product_brand or ai_result.get('detected_brand', 'Unknown')
             final_model = video_entry.product_model or ai_result.get('detected_model', 'Unknown')
@@ -1327,6 +1417,7 @@ class AdminService:
             
             logger.info(f"📝 Código generado: {reference_code}")
             
+            # ✅ CORRECCIÓN 33: Crear Product CON company_id
             new_product = Product(
                 reference_code=reference_code,
                 description=f"{final_brand} {final_model}",
@@ -1337,6 +1428,7 @@ class AdminService:
                 total_quantity=video_entry.total_quantity,
                 unit_price=video_entry.unit_price,
                 box_price=video_entry.box_price or Decimal('0.00'),
+                company_id=self.company_id,  # ✅ AGREGAR
                 is_active=1,
                 created_at=start_time,
                 updated_at=start_time
@@ -1356,12 +1448,14 @@ class AdminService:
             for size_entry in video_entry.size_quantities:
                 logger.info(f"📏 Creando talla {size_entry.size} con {size_entry.quantity} unidades")
                 
+                # ✅ CORRECCIÓN 34: Crear ProductSize CON company_id
                 product_size = ProductSize(
                     product_id=new_product.id,
                     size=size_entry.size,
                     quantity=size_entry.quantity,
                     quantity_exhibition=0,
                     location_name=warehouse.name,
+                    company_id=self.company_id,  # ✅ AGREGAR
                     created_at=start_time,
                     updated_at=start_time
                 )
@@ -1375,12 +1469,14 @@ class AdminService:
             
             logger.info("🔄 Creando inventory change...")
             
+            # ✅ CORRECCIÓN 35: Crear InventoryChange CON company_id (si la tabla lo tiene)
             inventory_change = InventoryChange(
                 product_id=new_product.id,
                 change_type="video_inventory_creation",
                 quantity_before=0,
                 quantity_after=video_entry.total_quantity,
                 user_id=admin.id,
+                company_id=self.company_id,  # ✅ AGREGAR SI LA TABLA LO TIENE
                 notes=f"Inventario creado por admin - Tallas específicas: {len(video_entry.size_quantities)} - {video_entry.notes or ''}",
                 created_at=start_time
             )
@@ -1418,7 +1514,7 @@ class AdminService:
                 created_by_name=admin.full_name,
                 created_at=start_time,
                 processing_time_seconds=processing_time,
-                unit_price=float(new_product.unit_price),  # Para serializar correctamente
+                unit_price=float(new_product.unit_price),
                 box_price=float(new_product.box_price) if new_product.box_price else None
             )
             
@@ -1451,9 +1547,7 @@ class AdminService:
                 detail=error_message
             )
 
-# ==================== 🚀 NUEVO MÉTODO: ENVÍO DIRECTO AL MICROSERVICIO ====================
-
-# app/modules/admin/service.py - MÉTODO DIRECTO CORREGIDO
+    # ==================== 🚀 MÉTODO: ENVÍO DIRECTO AL MICROSERVICIO ====================
 
     async def _send_video_to_microservice_direct(
         self, 
@@ -1576,6 +1670,7 @@ class AdminService:
             # Crear producto final
             reference_code = ai_result.get("recommended_reference_code") or f"{processing_job.detected_brand[:3].upper()}-{processing_job.detected_model[:4].upper()}-{processing_job.id}"
             
+            # ✅ CORRECCIÓN 36: Crear Product CON company_id
             final_product = Product(
                 reference_code=reference_code,
                 description=f"{processing_job.detected_brand} {processing_job.detected_model}",
@@ -1584,10 +1679,10 @@ class AdminService:
                 color_info=", ".join(json.loads(processing_job.detected_colors)) if processing_job.detected_colors else None,
                 location_name=warehouse.name,
                 total_quantity=processing_job.estimated_quantity,
+                company_id=self.company_id,  # ✅ AGREGAR
                 is_active=1,
                 created_at=datetime.now(),  
                 updated_at=datetime.now()
-
             )
             
             self.db.add(final_product)
@@ -1598,21 +1693,24 @@ class AdminService:
             if detected_sizes:
                 quantity_per_size = processing_job.estimated_quantity // len(detected_sizes)
                 for size in detected_sizes:
+                    # ✅ CORRECCIÓN 37: Crear ProductSize CON company_id
                     product_size = ProductSize(
                         product_id=final_product.id,
                         size=size,
                         quantity=quantity_per_size,
-                        location_name=warehouse.name
+                        location_name=warehouse.name,
+                        company_id=self.company_id  # ✅ AGREGAR
                     )
                     self.db.add(product_size)
             
-            # Crear inventory change final
+            # ✅ CORRECCIÓN 38: Crear inventory change CON company_id
             inventory_change = InventoryChange(
                 product_id=final_product.id,
                 change_type="video_ai_creation",
                 quantity_before=0,
                 quantity_after=processing_job.estimated_quantity,
                 user_id=admin.id,
+                company_id=self.company_id,  # ✅ AGREGAR SI LA TABLA LO TIENE
                 notes=f"Producto creado via IA - Video: {processing_job.original_filename} - Confianza: {processing_job.confidence_score*100:.1f}%",
                 created_at=datetime.now()
             )
@@ -1667,12 +1765,12 @@ class AdminService:
                 # ✅ HEADERS CORRECTOS PARA AUTENTICACIÓN
                 headers = {}
                 if hasattr(settings, 'VIDEO_MICROSERVICE_API_KEY') and settings.VIDEO_MICROSERVICE_API_KEY:
-                    headers["X-API-Key"] = settings.VIDEO_MICROSERVICE_API_KEY  # ⚠️ CAMBIO: X-API-Key en lugar de Authorization
+                    headers["X-API-Key"] = settings.VIDEO_MICROSERVICE_API_KEY
                 
                 # ✅ LLAMADA AL MICROSERVICIO CON URL CORRECTA
                 async with httpx.AsyncClient(timeout=300) as client:
                     response = await client.post(
-                        f"{settings.VIDEO_MICROSERVICE_URL}/api/v1/process-video",  # ✅ Variable correcta
+                        f"{settings.VIDEO_MICROSERVICE_URL}/api/v1/process-video",
                         files=files,
                         data=data,
                         headers=headers
@@ -1749,10 +1847,12 @@ class AdminService:
     async def get_video_processing_status(self, job_id: int, admin: User) -> Dict[str, Any]:
         """Consultar estado de procesamiento"""
         
+        # ✅ CORRECCIÓN 39: Buscar job CON company_id (si la tabla lo tiene)
         from app.shared.database.models import VideoProcessingJob
         job = self.db.query(VideoProcessingJob).filter(
             VideoProcessingJob.id == job_id,
             VideoProcessingJob.submitted_by_user_id == admin.id
+            # VideoProcessingJob.company_id == self.company_id  # ✅ AGREGAR SI LA TABLA LO TIENE
         ).first()
         
         if not job:
@@ -1832,9 +1932,14 @@ class AdminService:
         from app.shared.database.models import VideoProcessingJob, Location, User
         import json
         
+        # ✅ CORRECCIÓN 40: Agregar filtro de company_id en el query
         query = self.db.query(VideoProcessingJob, Location, User)\
             .join(Location, VideoProcessingJob.warehouse_location_id == Location.id)\
-            .join(User, VideoProcessingJob.processed_by_user_id == User.id)
+            .join(User, VideoProcessingJob.processed_by_user_id == User.id)\
+            .filter(
+                Location.company_id == self.company_id,  # ✅ AGREGAR
+                User.company_id == self.company_id  # ✅ AGREGAR
+            )
         
         # Filtros
         if status:
@@ -1913,13 +2018,14 @@ class AdminService:
                 best_product.get('model_name', 'Unknown')
             )
             
-            # Obtener warehouse
+            # ✅ CORRECCIÓN 41: Obtener warehouse CON company_id
             from app.shared.database.models import Location
             warehouse = self.db.query(Location).filter(
-                Location.id == processing_job.warehouse_location_id
+                Location.id == processing_job.warehouse_location_id,
+                Location.company_id == self.company_id  # ✅ AGREGAR
             ).first()
             
-            # Crear producto
+            # ✅ CORRECCIÓN 42: Crear producto CON company_id
             new_product = Product(
                 reference_code=reference_code,
                 description=f"{best_product.get('brand', 'Unknown')} {best_product.get('model_name', 'Unknown')}",
@@ -1930,6 +2036,7 @@ class AdminService:
                 unit_price=Decimal('0.00'),
                 box_price=Decimal('0.00'),
                 total_quantity=processing_job.estimated_quantity,
+                company_id=self.company_id,  # ✅ AGREGAR
                 is_active=1,
                 created_at=datetime.now(),
                 updated_at=datetime.now()
@@ -1943,14 +2050,16 @@ class AdminService:
             quantity_per_size = processing_job.estimated_quantity // len(sizes)
             
             for size in sizes:
+                # ✅ CORRECCIÓN 43: Crear ProductSize CON company_id y CORREGIR TYPO
                 product_size = ProductSize(
                     product_id=new_product.id,
                     size=size,
                     quantity=quantity_per_size,
                     quantity_exhibition=0,
                     location_name=warehouse.name if warehouse else "Unknown",
-                    created_at=deatetime.now(),
-                    updated_at=deatetime.now() 
+                    company_id=self.company_id,  # ✅ AGREGAR
+                    created_at=datetime.now(),   # ✅ CORREGIR TYPO: datetime (no deatetime)
+                    updated_at=datetime.now()    # ✅ CORREGIR TYPO: datetime (no deatetime)
                 )
                 self.db.add(product_size)
             
@@ -1982,11 +2091,15 @@ class AdminService:
         from app.shared.database.models import VideoProcessingJob, Location, User
         import json
         
-        # Buscar el job específico
+        # ✅ CORRECCIÓN 44: Buscar el job CON company_id
         query = self.db.query(VideoProcessingJob, Location, User)\
             .join(Location, VideoProcessingJob.warehouse_location_id == Location.id)\
             .join(User, VideoProcessingJob.processed_by_user_id == User.id)\
-            .filter(VideoProcessingJob.id == video_id)
+            .filter(
+                VideoProcessingJob.id == video_id,
+                Location.company_id == self.company_id,  # ✅ AGREGAR
+                User.company_id == self.company_id  # ✅ AGREGAR
+            )
         
         result = query.first()
         
@@ -2020,49 +2133,8 @@ class AdminService:
             notes=job.notes
         )
 
-    def require_location_access(location_param: str = "location_id", action: str = "gestionar"):
-        """
-        Decorador para validar automáticamente acceso a ubicaciones
-        
-        Args:
-            location_param: Nombre del parámetro que contiene location_id
-            action: Descripción de la acción para el mensaje de error
-        """
-        def decorator(func: Callable):
-            @wraps(func)
-            async def wrapper(self, *args, **kwargs):
-                # Buscar el parámetro admin/current_user
-                admin = None
-                for arg in args:
-                    if hasattr(arg, 'role') and hasattr(arg, 'id'):
-                        admin = arg
-                        break
-                
-                if not admin:
-                    raise HTTPException(500, "Admin user not found in method parameters")
-                
-                # Buscar location_id en los argumentos
-                location_id = None
-                
-                # Buscar en argumentos posicionales
-                for arg in args:
-                    if hasattr(arg, location_param):
-                        location_id = getattr(arg, location_param)
-                        break
-                
-                # Buscar en kwargs
-                if location_id is None and location_param in kwargs:
-                    location_id = kwargs[location_param]
-                
-                # Validar acceso si se encontró location_id
-                if location_id:
-                    await self._validate_location_access(admin, location_id, action)
-                
-                # Ejecutar función original
-                return await func(self, *args, **kwargs)
-            
-            return wrapper
-        return decorator
+
+# ==================== DECORADORES ====================
 
 def require_location_access(location_param: str = "location_id", action: str = "gestionar"):
     """

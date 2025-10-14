@@ -2,7 +2,7 @@
 from datetime import datetime, date, timedelta
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, func, or_, desc, asc , text
+from sqlalchemy import and_, func, or_, desc, asc, text
 from decimal import Decimal
 from dateutil.relativedelta import *
 import json
@@ -10,8 +10,8 @@ import json
 from app.shared.database.models import (
     User, Location, Sale, SaleItem, Product, ProductSize,
     DiscountRequest, TransferRequest, Expense, UserLocationAssignment,
-    InventoryChange , AdminLocationAssignment,CostConfiguration, CostPayment, CostPaymentException, 
-    CostDeletionArchive
+    InventoryChange, AdminLocationAssignment, CostConfiguration, CostPayment, 
+    CostPaymentException, CostDeletionArchive
 )
 
 
@@ -497,19 +497,28 @@ class AdminRepository:
     
     # ==================== REPORTES ====================
     
-    def generate_sales_report(
+    def generate_sales_reports(
         self, 
-        location_ids: List[int], 
-        start_date: date, 
-        end_date: date,
-        user_ids: Optional[List[int]] = None
+        filters: Any,  # ReportFilter object
+        company_id: int  # ✅ CORRECCIÓN 1: Agregar parámetro company_id
     ) -> List[Dict[str, Any]]:
-        """Generar reporte de ventas"""
+        """Generar reporte de ventas - MULTI-TENANT"""
         
         reports = []
         
+        # ✅ CORRECCIÓN 2: Usar location_ids del objeto filters
+        location_ids = filters.location_ids if hasattr(filters, 'location_ids') else []
+        start_date = filters.start_date if hasattr(filters, 'start_date') else date.today()
+        end_date = filters.end_date if hasattr(filters, 'end_date') else date.today()
+        user_ids = filters.user_ids if hasattr(filters, 'user_ids') else None
+        
         for location_id in location_ids:
-            location = self.db.query(Location).filter(Location.id == location_id).first()
+            # ✅ CORRECCIÓN 3: Filtrar location por company_id
+            location = self.db.query(Location).filter(
+                Location.id == location_id,
+                Location.company_id == company_id  # ✅ AGREGAR
+            ).first()
+            
             if not location:
                 continue
             
@@ -517,6 +526,7 @@ class AdminRepository:
             sales_query = self.db.query(Sale)\
                 .filter(
                     Sale.location_id == location_id,
+                    Sale.company_id == company_id,  # ✅ YA ESTÁ
                     func.date(Sale.sale_date) >= start_date,
                     func.date(Sale.sale_date) <= end_date
                 )
@@ -531,7 +541,7 @@ class AdminRepository:
             total_transactions = len(sales)
             average_ticket = total_sales / total_transactions if total_transactions > 0 else Decimal('0')
             
-            # Top productos (simplificado)
+            # ✅ CORRECCIÓN 4: Top productos CON company_id
             top_products_query = self.db.query(
                 SaleItem.sneaker_reference_code,
                 SaleItem.brand,
@@ -541,6 +551,8 @@ class AdminRepository:
             ).join(Sale, Sale.id == SaleItem.sale_id)\
              .filter(
                  Sale.location_id == location_id,
+                 Sale.company_id == company_id,  # ✅ AGREGAR
+                 SaleItem.company_id == company_id,  # ✅ AGREGAR
                  func.date(Sale.sale_date) >= start_date,
                  func.date(Sale.sale_date) <= end_date
              ).group_by(
@@ -560,13 +572,14 @@ class AdminRepository:
                 } for prod in top_products_query
             ]
             
-            # Ventas por día
+            # ✅ CORRECCIÓN 5: Ventas por día CON company_id
             sales_by_day_query = self.db.query(
                 func.date(Sale.sale_date).label('sale_date'),
                 func.sum(Sale.total_amount).label('daily_total'),
                 func.count(Sale.id).label('daily_count')
             ).filter(
                 Sale.location_id == location_id,
+                Sale.company_id == company_id,  # ✅ AGREGAR
                 func.date(Sale.sale_date) >= start_date,
                 func.date(Sale.sale_date) <= end_date
             ).group_by(func.date(Sale.sale_date))\
@@ -580,7 +593,7 @@ class AdminRepository:
                 } for day in sales_by_day_query
             ]
             
-            # Ventas por usuario
+            # ✅ CORRECCIÓN 6: Ventas por usuario CON company_id
             sales_by_user_query = self.db.query(
                 User.first_name,
                 User.last_name,
@@ -589,6 +602,8 @@ class AdminRepository:
             ).join(Sale, Sale.seller_id == User.id)\
              .filter(
                  Sale.location_id == location_id,
+                 Sale.company_id == company_id,  # ✅ AGREGAR
+                 User.company_id == company_id,  # ✅ AGREGAR
                  func.date(Sale.sale_date) >= start_date,
                  func.date(Sale.sale_date) <= end_date
              ).group_by(User.id, User.first_name, User.last_name)\
@@ -707,112 +722,120 @@ class AdminRepository:
     
     # ==================== PERFORMANCE DE USUARIOS ====================
     
-    def get_user_performance(
+    def get_users_performance(
         self, 
-        user_id: int, 
+        user_ids: List[int],
         start_date: date, 
         end_date: date,
-        company_id: int
-    ) -> Dict[str, Any]:
-        """Obtener performance de un usuario específico - MULTI-TENANT"""
+        company_id: int  # ✅ YA TIENE EL PARÁMETRO
+    ) -> List[Dict[str, Any]]:
+        """Obtener performance de usuarios - MULTI-TENANT"""
         
-        user = self.db.query(User).filter(
-            User.id == user_id,
-            User.company_id == company_id
-        ).first()
-        if not user:
-            return {}
+        performances = []
         
-        performance = {
-            "user_id": user_id,
-            "user_name": user.full_name,
-            "role": user.role,
-            "location_id": user.location_id,
-            "location_name": user.location.name if user.location else "N/A",
-            "period_start": start_date,
-            "period_end": end_date,
-            "metrics": {}
-        }
-        
-        if user.role == "vendedor":
-            # Métricas de vendedor
-            sales = self.db.query(Sale)\
-                .filter(
-                    Sale.seller_id == user_id,
-                    Sale.company_id == company_id,
-                    func.date(Sale.sale_date) >= start_date,
-                    func.date(Sale.sale_date) <= end_date
-                ).all()
+        for user_id in user_ids:
+            # ✅ CORRECCIÓN 7: Buscar usuario CON company_id
+            user = self.db.query(User).filter(
+                User.id == user_id,
+                User.company_id == company_id 
+                ).first()
             
-            total_sales = sum(sale.total_amount for sale in sales)
-            total_transactions = len(sales)
-            avg_ticket = total_sales / total_transactions if total_transactions > 0 else Decimal('0')
+            if not user:
+                continue
             
-            # Productos vendidos
-            products_sold = self.db.query(func.sum(SaleItem.quantity))\
-                .join(Sale, Sale.id == SaleItem.sale_id)\
-                .filter(
-                    Sale.seller_id == user_id,
-                    Sale.company_id == company_id,
-                    SaleItem.company_id == company_id,
-                    func.date(Sale.sale_date) >= start_date,
-                    func.date(Sale.sale_date) <= end_date
-                ).scalar() or 0
-            
-            # Descuentos solicitados
-            discounts_requested = self.db.query(func.count(DiscountRequest.id))\
-                .filter(
-                    DiscountRequest.requester_user_id == user_id,
-                    DiscountRequest.company_id == company_id,
-                    func.date(DiscountRequest.requested_at) >= start_date,
-                    func.date(DiscountRequest.requested_at) <= end_date
-                ).scalar() or 0
-            
-            performance["metrics"] = {
-                "total_sales": float(total_sales),
-                "total_transactions": total_transactions,
-                "average_ticket": float(avg_ticket),
-                "products_sold": int(products_sold),
-                "discounts_requested": discounts_requested
+            performance = {
+                "user_id": user_id,
+                "user_name": user.full_name,
+                "role": user.role,
+                "location_id": user.location_id,
+                "location_name": user.location.name if user.location else "N/A",
+                "period_start": start_date,
+                "period_end": end_date,
+                "metrics": {}
             }
-        
-        elif user.role == "bodeguero":
-            # Métricas de bodeguero
-            transfers_processed = self.db.query(func.count(TransferRequest.id))\
-                .filter(
-                    TransferRequest.warehouse_keeper_id == user_id,
-                    TransferRequest.company_id == company_id,
-                    func.date(TransferRequest.accepted_at) >= start_date,
-                    func.date(TransferRequest.accepted_at) <= end_date
-                ).scalar() or 0
             
-            performance["metrics"] = {
-                "transfers_processed": transfers_processed,
-                "average_processing_time": 0,  # Se calcularía con timestamps
-                "returns_handled": 0,  # Se calcularía con tabla de returns
-                "discrepancies_reported": 0,  # Se calcularía con reportes de discrepancia
-                "accuracy_rate": 100.0  # Se calcularía basado en errores
-            }
-        
-        elif user.role == "corredor":
-            # Métricas de corredor
-            deliveries_completed = self.db.query(func.count(TransferRequest.id))\
-                .filter(
-                    TransferRequest.courier_id == user_id,
-                    TransferRequest.status == "completed",
-                    func.date(TransferRequest.delivered_at) >= start_date,
-                    func.date(TransferRequest.delivered_at) <= end_date
-                ).scalar() or 0
+            if user.role == "vendedor":
+                # ✅ CORRECCIÓN 8: Métricas de vendedor CON company_id
+                sales = self.db.query(Sale)\
+                    .filter(
+                        Sale.seller_id == user_id,
+                        Sale.company_id == company_id,  # ✅ AGREGAR
+                        func.date(Sale.sale_date) >= start_date,
+                        func.date(Sale.sale_date) <= end_date
+                    ).all()
+                
+                total_sales = sum(sale.total_amount for sale in sales)
+                total_transactions = len(sales)
+                avg_ticket = total_sales / total_transactions if total_transactions > 0 else Decimal('0')
+                
+                # ✅ CORRECCIÓN 9: Productos vendidos CON company_id
+                products_sold = self.db.query(func.sum(SaleItem.quantity))\
+                    .join(Sale, Sale.id == SaleItem.sale_id)\
+                    .filter(
+                        Sale.seller_id == user_id,
+                        Sale.company_id == company_id,  # ✅ AGREGAR
+                        SaleItem.company_id == company_id,  # ✅ AGREGAR
+                        func.date(Sale.sale_date) >= start_date,
+                        func.date(Sale.sale_date) <= end_date
+                    ).scalar() or 0
+                
+                # ✅ CORRECCIÓN 10: Descuentos solicitados CON company_id
+                discounts_requested = self.db.query(func.count(DiscountRequest.id))\
+                    .filter(
+                        DiscountRequest.requester_user_id == user_id,
+                        DiscountRequest.company_id == company_id,  # ✅ AGREGAR
+                        func.date(DiscountRequest.requested_at) >= start_date,
+                        func.date(DiscountRequest.requested_at) <= end_date
+                    ).scalar() or 0
+                
+                performance["metrics"] = {
+                    "total_sales": float(total_sales),
+                    "total_transactions": total_transactions,
+                    "average_ticket": float(avg_ticket),
+                    "products_sold": int(products_sold),
+                    "discounts_requested": discounts_requested
+                }
             
-            performance["metrics"] = {
-                "deliveries_completed": deliveries_completed,
-                "average_delivery_time": 0,  # Se calcularía con timestamps
-                "failed_deliveries": 0,  # Se calcularía con estado failed
-                "incidents_reported": 0,  # Se calcularía con tabla de incidentes
-                "on_time_rate": 100.0  # Se calcularía basado en tiempos estimados
-            }
+            elif user.role == "bodeguero":
+                # ✅ CORRECCIÓN 11: Métricas de bodeguero CON company_id
+                transfers_processed = self.db.query(func.count(TransferRequest.id))\
+                    .filter(
+                        TransferRequest.warehouse_keeper_id == user_id,
+                        TransferRequest.company_id == company_id,  # ✅ AGREGAR
+                        func.date(TransferRequest.accepted_at) >= start_date,
+                        func.date(TransferRequest.accepted_at) <= end_date
+                    ).scalar() or 0
+                
+                performance["metrics"] = {
+                    "transfers_processed": transfers_processed,
+                    "average_processing_time": 0,  # Se calcularía con timestamps
+                    "returns_handled": 0,  # Se calcularía con tabla de returns
+                    "discrepancies_reported": 0,  # Se calcularía con reportes de discrepancia
+                    "accuracy_rate": 100.0  # Se calcularía basado en errores
+                }
+            
+            elif user.role == "corredor":
+                # ✅ CORRECCIÓN 12: Métricas de corredor CON company_id
+                deliveries_completed = self.db.query(func.count(TransferRequest.id))\
+                    .filter(
+                        TransferRequest.courier_id == user_id,
+                        TransferRequest.company_id == company_id,  # ✅ AGREGAR
+                        TransferRequest.status == "completed",
+                        func.date(TransferRequest.delivered_at) >= start_date,
+                        func.date(TransferRequest.delivered_at) <= end_date
+                    ).scalar() or 0
+                
+                performance["metrics"] = {
+                    "deliveries_completed": deliveries_completed,
+                    "average_delivery_time": 0,  # Se calcularía con timestamps
+                    "failed_deliveries": 0,  # Se calcularía con estado failed
+                    "incidents_reported": 0,  # Se calcularía con tabla de incidentes
+                    "on_time_rate": 100.0  # Se calcularía basado en tiempos estimados
+                }
+            
+            performances.append(performance)
         
-        return performance
+        return performances
     
     # ==================== DASHBOARD ADMINISTRATIVO ====================
     
@@ -839,17 +862,17 @@ class AdminRepository:
             daily_summary["total_sales"] += Decimal(str(location_stats.get("daily_sales", 0)))
             daily_summary["active_users"] += location_stats.get("active_users", 0)
         
-        # Tareas pendientes
+        # ✅ CORRECCIÓN 13: Tareas pendientes CON company_id
         pending_tasks = {
             "discount_approvals": self.db.query(func.count(DiscountRequest.id))\
                 .filter(
                     DiscountRequest.status == "pending",
-                    DiscountRequest.company_id == company_id
+                    DiscountRequest.company_id == company_id  # ✅ AGREGAR
                 ).scalar() or 0,
             "pending_transfers": self.db.query(func.count(TransferRequest.id))\
                 .filter(
                     TransferRequest.status == "pending",
-                    TransferRequest.company_id == company_id
+                    TransferRequest.company_id == company_id  # ✅ AGREGAR
                 ).scalar() or 0,
             "low_stock_alerts": 0,  # Se calcularía con configuraciones de alerta
             "user_assignments": 0   # Se calcularía con asignaciones pendientes
@@ -883,6 +906,9 @@ class AdminRepository:
             },
             "recent_activities": recent_activities
         }
+
+
+# ==================== COST REPOSITORY ====================
 
 class CostRepository:
     """Repository para gestión de costos"""
@@ -1214,9 +1240,9 @@ class CostRepository:
             paid_payments_data=json.dumps(archive_data["paid_payments_data"], default=str),
             exceptions_data=json.dumps(archive_data["exceptions_data"], default=str),
             deleted_by_user_id=archive_data["deleted_by_user_id"],
-	    deletion_reason=archive_data["deletion_reason"]
-       )
-       
+            deletion_reason=archive_data["deletion_reason"]
+        )
+        
         self.db.add(archive)
         self.db.commit()
         self.db.refresh(archive)
