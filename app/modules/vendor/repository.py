@@ -17,8 +17,8 @@ class VendorRepository:
     def __init__(self, db: Session):
         self.db = db
     
-    def get_sales_summary_today(self, user_id: int) -> Dict[str, Any]:
-        """Obtener resumen de ventas del día - igual que backend antiguo"""
+    def get_sales_summary_today(self, user_id: int, company_id: int) -> Dict[str, Any]:
+        """Obtener resumen de ventas del día - FILTRADO POR COMPANY_ID"""
         today = date.today()
         
         # Query principal de ventas como en el backend antiguo
@@ -48,7 +48,8 @@ class VendorRepository:
         ).filter(
             and_(
                 func.date(Sale.sale_date) == today,
-                Sale.seller_id == user_id
+                Sale.seller_id == user_id,
+                Sale.company_id == company_id
             )
         ).first()
         
@@ -59,8 +60,8 @@ class VendorRepository:
             'pending_confirmations': result.pending_confirmations
         }
     
-    def get_payment_methods_breakdown_today(self, user_id: int) -> List[Dict[str, Any]]:
-        """Obtener desglose de métodos de pago del día - igual que backend antiguo"""
+    def get_payment_methods_breakdown_today(self, user_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """Obtener desglose de métodos de pago del día - FILTRADO POR COMPANY_ID"""
         today = date.today()
         
         results = self.db.query(
@@ -71,7 +72,9 @@ class VendorRepository:
             and_(
                 func.date(Sale.sale_date) == today,
                 Sale.seller_id == user_id,
-                Sale.confirmed == True
+                Sale.confirmed == True,
+                Sale.company_id == company_id,
+                SalePayment.company_id == company_id
             )
         ).group_by(SalePayment.payment_type).order_by(
             func.sum(SalePayment.amount).desc()
@@ -86,8 +89,8 @@ class VendorRepository:
             for result in results
         ]
     
-    def get_expenses_summary_today(self, user_id: int) -> Dict[str, Any]:
-        """Obtener resumen de gastos del día - igual que backend antiguo"""
+    def get_expenses_summary_today(self, user_id: int, company_id: int) -> Dict[str, Any]:
+        """Obtener resumen de gastos del día - FILTRADO POR COMPANY_ID"""
         today = date.today()
         
         result = self.db.query(
@@ -96,7 +99,8 @@ class VendorRepository:
         ).filter(
             and_(
                 func.date(Expense.expense_date) == today,
-                Expense.user_id == user_id
+                Expense.user_id == user_id,
+                Expense.company_id == company_id
             )
         ).first()
         
@@ -105,8 +109,8 @@ class VendorRepository:
             'total': float(result.total)
         }
     
-    def get_transfer_requests_stats(self, user_id: int) -> Dict[str, Any]:
-        """Obtener estadísticas de solicitudes de transferencia - igual que backend antiguo"""
+    def get_transfer_requests_stats(self, user_id: int, company_id: int) -> Dict[str, Any]:
+        """Obtener estadísticas de solicitudes de transferencia - FILTRADO POR COMPANY_ID"""
         result = self.db.query(
             func.count(
                 case((TransferRequest.status == 'pending', 1))
@@ -117,7 +121,12 @@ class VendorRepository:
             func.count(
                 case((TransferRequest.status == 'delivered', 1))
             ).label('delivered')
-        ).filter(TransferRequest.requester_id == user_id).first()
+        ).filter(
+            and_(
+                TransferRequest.requester_id == user_id,
+                TransferRequest.company_id == company_id
+            )
+        ).first()
         
         return {
             'pending': result.pending,
@@ -125,8 +134,8 @@ class VendorRepository:
             'delivered': result.delivered
         }
     
-    def get_discount_requests_stats(self, user_id: int) -> Dict[str, Any]:
-        """Obtener estadísticas de solicitudes de descuento - igual que backend antiguo"""
+    def get_discount_requests_stats(self, user_id: int, company_id: int) -> Dict[str, Any]:
+        """Obtener estadísticas de solicitudes de descuento - FILTRADO POR COMPANY_ID"""
         result = self.db.query(
             func.count(
                 case((DiscountRequest.status == 'pending', 1))
@@ -137,7 +146,12 @@ class VendorRepository:
             func.count(
                 case((DiscountRequest.status == 'rejected', 1))
             ).label('rejected')
-        ).filter(DiscountRequest.seller_id == user_id).first()
+        ).filter(
+            and_(
+                DiscountRequest.seller_id == user_id,
+                DiscountRequest.company_id == company_id
+            )
+        ).first()
         
         return {
             'pending': result.pending,
@@ -145,25 +159,28 @@ class VendorRepository:
             'rejected': result.rejected
         }
     
-    def get_unread_return_notifications(self, user_id: int) -> int:
-        """Obtener notificaciones de devolución no leídas - igual que backend antiguo"""
+    def get_unread_return_notifications(self, user_id: int, company_id: int) -> int:
+        """Obtener notificaciones de devolución no leídas - FILTRADO POR COMPANY_ID"""
         count = self.db.query(func.count(ReturnNotification.id)).join(
             TransferRequest, ReturnNotification.transfer_request_id == TransferRequest.id
         ).filter(
             and_(
                 TransferRequest.requester_id == user_id,
-                ReturnNotification.read_by_requester == False
+                ReturnNotification.read_by_requester == False,
+                TransferRequest.company_id == company_id,
+                ReturnNotification.company_id == company_id
             )
         ).scalar()
         
         return count or 0
     
-    def get_pending_transfers_for_vendor(self, user_id: int) -> List[Dict[str, Any]]:
-        """Obtener transferencias pendientes para el vendedor (recepciones por confirmar)"""
+    def get_pending_transfers_for_vendor(self, user_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """Obtener transferencias pendientes para el vendedor - FILTRADO POR COMPANY_ID"""
         # Transferencias en estado 'delivered' que requieren confirmación
         transfers = self.db.query(TransferRequest).filter(
             and_(
                 TransferRequest.requester_id == user_id,
+                TransferRequest.company_id == company_id,
                 TransferRequest.status != 'completed',
                 TransferRequest.status != 'cancelled'
             )
@@ -179,7 +196,8 @@ class VendorRepository:
             
             product_image = self._get_product_image(
             transfer.sneaker_reference_code,
-            transfer.source_location_id
+            transfer.source_location_id,
+            company_id
             )
 
             priority, next_action, action_required = self._get_transfer_status_info(
@@ -213,15 +231,18 @@ class VendorRepository:
         return result
     
 
-    def _get_product_image(self, reference_code: str, source_location_id: int) -> str:
+    def _get_product_image(self, reference_code: str, source_location_id: int, company_id: int) -> str:
         """
-        Obtener imagen del producto
+        Obtener imagen del producto - FILTRADO POR COMPANY_ID
         Busca primero en ubicación origen, luego global, finalmente placeholder
         """
         try:
             # Obtener nombre real de ubicación origen
             source_location = self.db.query(Location).filter(
-                Location.id == source_location_id
+                and_(
+                    Location.id == source_location_id,
+                    Location.company_id == company_id
+                )
             ).first()
             
             if not source_location:
@@ -231,14 +252,18 @@ class VendorRepository:
             product = self.db.query(Product).filter(
                 and_(
                     Product.reference_code == reference_code,
-                    Product.location_name == source_location.name
+                    Product.location_name == source_location.name,
+                    Product.company_id == company_id
                 )
             ).first()
             
             # Si no existe o no tiene imagen, buscar global
             if not product or not product.image_url:
                 product = self.db.query(Product).filter(
-                    Product.reference_code == reference_code
+                    and_(
+                        Product.reference_code == reference_code,
+                        Product.company_id == company_id
+                    )
                 ).first()
             
             # Retornar imagen o placeholder
@@ -314,13 +339,14 @@ class VendorRepository:
         
         return priority, next_action, action_required
 
-    def get_completed_transfers_today(self, user_id: int) -> List[Dict[str, Any]]:
-        """Obtener transferencias completadas del día"""
+    def get_completed_transfers_today(self, user_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """Obtener transferencias completadas del día - FILTRADO POR COMPANY_ID"""
         today = date.today()
         
         transfers = self.db.query(TransferRequest).filter(
             and_(
                 TransferRequest.requester_id == user_id,
+                TransferRequest.company_id == company_id,
                 TransferRequest.status.in_(['completed', 'cancelled']),
                 func.date(TransferRequest.confirmed_reception_at) == today
             )
@@ -354,9 +380,9 @@ class VendorRepository:
         
         return result
     
-    def get_vendor_pickup_assignments(self, vendor_id: int) -> List[Dict[str, Any]]:
+    def get_vendor_pickup_assignments(self, vendor_id: int, company_id: int) -> List[Dict[str, Any]]:
         """
-        Obtener transferencias que el vendedor debe recoger personalmente
+        Obtener transferencias que el vendedor debe recoger personalmente - FILTRADO POR COMPANY_ID
         (pickup_type = 'vendedor')
         
         Estados válidos: 'accepted' (listo para recoger), 'in_transit' (en camino)
@@ -393,7 +419,9 @@ class VendorRepository:
             ).filter(
                 and_(
                     TransferRequest.courier_id == vendor_id,
+                    TransferRequest.company_id == company_id,
                     TransferRequest.pickup_type == 'vendedor',
+                    Location.company_id == company_id,
                     or_(
                         TransferRequest.status == 'accepted',
                         TransferRequest.status == 'in_transit'
@@ -434,7 +462,8 @@ class VendorRepository:
                 product_image = self._get_product_image_for_transfer(
                     assignment.sneaker_reference_code,
                     assignment.brand,
-                    assignment.model
+                    assignment.model,
+                    company_id
                 )
                 
                 results.append({
@@ -468,14 +497,17 @@ class VendorRepository:
             logger.exception("❌ Error obteniendo asignaciones de pickup")
             return []
 
-    def _get_product_image_for_transfer(self, reference_code: str, brand: str, model: str) -> str:
-        """Obtener imagen del producto para transferencia"""
+    def _get_product_image_for_transfer(self, reference_code: str, brand: str, model: str, company_id: int) -> str:
+        """Obtener imagen del producto para transferencia - FILTRADO POR COMPANY_ID"""
         try:
             from app.shared.database.models import Product
             
             # Buscar producto con imagen
             product = self.db.query(Product).filter(
-                Product.reference_code == reference_code
+                and_(
+                    Product.reference_code == reference_code,
+                    Product.company_id == company_id
+                )
             ).first()
             
             if product and product.image_url:
@@ -493,10 +525,11 @@ class VendorRepository:
         self,
         return_id: int,
         delivery_notes: str,
-        vendor_id: int
+        vendor_id: int,
+        company_id: int
     ) -> Dict[str, Any]:
         """
-        Vendedor confirma que entregó return personalmente en bodega
+        Vendedor confirma que entregó return personalmente en bodega - FILTRADO POR COMPANY_ID
         
         IMPORTANTE: Este paso NO actualiza inventario
         Solo confirma que el vendedor llevó el producto
@@ -508,7 +541,10 @@ class VendorRepository:
             
             # ==================== VALIDACIÓN 1: OBTENER RETURN ====================
             return_transfer = self.db.query(TransferRequest).filter(
-                TransferRequest.id == return_id
+                and_(
+                    TransferRequest.id == return_id,
+                    TransferRequest.company_id == company_id
+                )
             ).first()
             
             if not return_transfer:
@@ -544,7 +580,10 @@ class VendorRepository:
             
             # ==================== OBTENER UBICACIÓN DESTINO ====================
             destination_location = self.db.query(Location).filter(
-                Location.id == return_transfer.destination_location_id
+                and_(
+                    Location.id == return_transfer.destination_location_id,
+                    Location.company_id == company_id
+                )
             ).first()
             
             destination_location_name = destination_location.name if destination_location else "Bodega"

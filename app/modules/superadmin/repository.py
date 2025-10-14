@@ -351,7 +351,7 @@ class SuperadminRepository:
         }
     
     # =====================================================
-    # SUPERADMIN USER
+    # SUPERADMIN USER y users Boss
     # =====================================================
     
     def superadmin_exists(self) -> bool:
@@ -364,3 +364,40 @@ class SuperadminRepository:
         self.db.commit()
         self.db.refresh(user)
         return user
+
+    def get_company_boss(self, company_id: int) -> Optional[User]:
+        """Obtener el usuario Boss de una empresa (si existe)"""
+        return (
+            self.db.query(User)
+            .filter(
+                User.company_id == company_id,
+                User.role == "boss",
+                User.is_active == True
+            )
+            .first()
+        )
+    
+    def boss_exists_for_company(self, company_id: int) -> bool:
+        """Verificar si ya existe un Boss para la empresa"""
+        return self.db.query(
+            exists().where(
+                and_(
+                    User.company_id == company_id,
+                    User.role == "boss",
+                    User.is_active == True
+                )
+            )
+        ).scalar()
+    
+    def email_exists(self, email: str) -> bool:
+        """Verificar si el email ya está registrado"""
+        return self.db.query(
+            exists().where(User.email == email)
+        ).scalar()
+    
+    def create_boss_user(self, boss: User) -> User:
+        """Crear usuario Boss en la base de datos"""
+        self.db.add(boss)
+        self.db.commit()
+        self.db.refresh(boss)
+        return boss

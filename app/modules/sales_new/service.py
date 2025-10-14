@@ -53,6 +53,8 @@ class SalesService:
             
             # PASO 2: Subir recibo (no crítico - no bloquea venta)
             receipt_url = await self._upload_receipt_safe(receipt_image, seller_id)
+            logger.info(f" IMPORTANTEEEEE  company_id: {company_id} ")
+            print(f"company_id: {company_id} ")
             
             # PASO 3: Crear venta (TRANSACCIÓN ATÓMICA en repository)
             try:

@@ -3,6 +3,7 @@ from typing import Dict, Any
 from datetime import datetime
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, Query
+from sqlalchemy import and_
 import logging
 
 from .repository import WarehouseRepository
@@ -17,13 +18,14 @@ from app.modules.transfers_new.schemas import ReturnReceptionConfirmation
 logger = logging.getLogger(__name__)
 
 class WarehouseService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, company_id: int):
         self.db = db
+        self.company_id = company_id
         self.repository = WarehouseRepository(db)
     
     async def get_pending_requests(self, user_id: int, user_info: Dict[str, Any]) -> PendingRequestsResponse:
         """BG001: Obtener solicitudes pendientes para bodeguero"""
-        requests = self.repository.get_pending_requests_for_warehouse(user_id)
+        requests = self.repository.get_pending_requests_for_warehouse(user_id, self.company_id)
         
         # Estadísticas como en backend antiguo
         breakdown = {
@@ -47,7 +49,7 @@ class WarehouseService:
         """BG002: Aceptar/rechazar solicitud de transferencia"""
         
         # Validar que la solicitud existe y está pendiente
-        managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id)
+        managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id, self.company_id)
         location_ids = [loc['location_id'] for loc in managed_locations]
         
         if not location_ids:
@@ -60,7 +62,7 @@ class WarehouseService:
         }
         
         success = self.repository.accept_transfer_request(
-            acceptance.transfer_request_id, acceptance_data, warehouse_keeper_id
+            acceptance.transfer_request_id, acceptance_data, warehouse_keeper_id, self.company_id
         )
         
         if not success:
@@ -76,7 +78,7 @@ class WarehouseService:
     
     async def get_accepted_requests(self, warehouse_keeper_id: int, user_info: Dict[str, Any]) -> AcceptedRequestsResponse:
         """BG002: Obtener solicitudes aceptadas y en preparación"""
-        requests = self.repository.get_accepted_requests_by_warehouse_keeper(warehouse_keeper_id)
+        requests = self.repository.get_accepted_requests_by_warehouse_keeper(warehouse_keeper_id, self.company_id)
         
         return AcceptedRequestsResponse(
             success=True,
@@ -85,7 +87,7 @@ class WarehouseService:
             count=len(requests),
             warehouse_info={
                 "warehouse_keeper": f"{user_info['first_name']} {user_info['last_name']}",
-                "location_assignments": len(self.repository.get_user_managed_locations(warehouse_keeper_id))
+                "location_assignments": len(self.repository.get_user_managed_locations(warehouse_keeper_id, self.company_id))
             }
         )
     
@@ -99,7 +101,7 @@ class WarehouseService:
         """BG003: Entregar productos a corredor con todas las validaciones"""
         
         # Validar permisos del bodeguero
-        managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id)
+        managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id, self.company_id)
         location_ids = [loc['location_id'] for loc in managed_locations]
         
         if not location_ids:
@@ -110,7 +112,10 @@ class WarehouseService:
         
         # Validar que la transferencia es de una ubicación gestionada
         transfer = self.db.query(TransferRequest).filter(
-            TransferRequest.id == delivery.transfer_request_id
+            and_(
+                TransferRequest.id == delivery.transfer_request_id,
+                TransferRequest.company_id == self.company_id
+            )
         ).first()
         
         if not transfer:
@@ -132,7 +137,8 @@ class WarehouseService:
             # Llamar al repository que hace toda la lógica
             result = self.repository.deliver_to_courier(
                 delivery.transfer_request_id, 
-                delivery_data
+                delivery_data,
+                self.company_id
             )
             
             return {
@@ -150,7 +156,7 @@ class WarehouseService:
     
     async def get_inventory_by_location(self, location_id: int) -> InventoryByLocationResponse:
         """BG006: Consultar inventario disponible por ubicación"""
-        inventory = self.repository.get_inventory_by_location(location_id)
+        inventory = self.repository.get_inventory_by_location(location_id, self.company_id)
         
         # Calcular resumen
         total_products = len(inventory)
@@ -197,7 +203,7 @@ class WarehouseService:
         """
         
         # Validar permisos del bodeguero
-        managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id)
+        managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id, self.company_id)
         location_ids = [loc['location_id'] for loc in managed_locations]
         
         if not location_ids:
@@ -208,7 +214,10 @@ class WarehouseService:
         
         # Validar que la transferencia es de una ubicación gestionada
         transfer = self.db.query(TransferRequest).filter(
-            TransferRequest.id == transfer_id
+            and_(
+                TransferRequest.id == transfer_id,
+                TransferRequest.company_id == self.company_id
+            )
         ).first()
         
         if not transfer:
@@ -230,7 +239,8 @@ class WarehouseService:
             # Llamar al repository que hace toda la lógica
             result = self.repository.deliver_to_vendor(
                 transfer_id, 
-                delivery_data
+                delivery_data,
+                self.company_id
             )
             
             return {
@@ -270,7 +280,7 @@ class WarehouseService:
             logger.info(f"📦 Confirmando recepción de return #{return_id}")
             
             # Validar permisos
-            managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id)
+            managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id, self.company_id)
             location_ids = [loc['location_id'] for loc in managed_locations]
             
             if not location_ids:
@@ -281,7 +291,8 @@ class WarehouseService:
                 return_id,
                 reception.dict(),
                 warehouse_keeper_id,
-                location_ids
+                location_ids,
+                self.company_id
             )
             
             return {

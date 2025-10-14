@@ -12,8 +12,8 @@ class CourierRepository:
     def __init__(self, db: Session):
         self.db = db
     
-    def get_available_requests_for_courier(self, courier_id: int) -> List[Dict[str, Any]]:
-        """CO001: Obtener solicitudes disponibles para corredor - igual que backend antiguo"""
+    def get_available_requests_for_courier(self, courier_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """CO001: Obtener solicitudes disponibles para corredor - FILTRADO POR COMPANY_ID"""
         # Query compleja como en el backend standalone
         query = text("""
             SELECT tr.*, 
@@ -42,13 +42,16 @@ class CourierRepository:
             LEFT JOIN products p ON tr.sneaker_reference_code = p.reference_code
             WHERE tr.pickup_type = 'corredor'
                 AND tr.status = 'accepted'
+                AND tr.company_id = :company_id
+                AND sl.company_id = :company_id
+                AND dl.company_id = :company_id
             ORDER BY 
                 CASE WHEN tr.purpose = 'cliente' THEN 1 ELSE 2 END,
                 CASE WHEN tr.courier_id = :courier_id THEN 1 ELSE 2 END,
                 tr.accepted_at ASC
         """)
         
-        results = self.db.execute(query, {"courier_id": courier_id}).fetchall()
+        results = self.db.execute(query, {"courier_id": courier_id, "company_id": company_id}).fetchall()
         
         requests = []
         for row in results:
@@ -126,15 +129,16 @@ class CourierRepository:
         
         return requests
     
-    def accept_courier_request(self, request_id: int, courier_id: int, estimated_time: int, notes: str) -> bool:
-        """CO002: Aceptar solicitud como corredor con concurrencia"""
+    def accept_courier_request(self, request_id: int, courier_id: int, estimated_time: int, notes: str, company_id: int) -> bool:
+        """CO002: Aceptar solicitud como corredor con concurrencia - FILTRADO POR COMPANY_ID"""
         try:
             # Verificar que la solicitud está disponible (prevenir race conditions)
             transfer = self.db.query(TransferRequest).filter(
                 and_(
                     TransferRequest.id == request_id,
                     TransferRequest.status == 'accepted',
-                    TransferRequest.courier_id == None
+                    TransferRequest.courier_id == None,
+                    TransferRequest.company_id == company_id
                 )
             ).first()
             
@@ -156,14 +160,15 @@ class CourierRepository:
             print(f"Error aceptando solicitud: {e}")
             return False
     
-    def confirm_pickup(self, request_id: int, courier_id: int, pickup_notes: str) -> bool:
-        """CO003: Confirmar recolección"""
+    def confirm_pickup(self, request_id: int, courier_id: int, pickup_notes: str, company_id: int) -> bool:
+        """CO003: Confirmar recolección - FILTRADO POR COMPANY_ID"""
         try:
             transfer = self.db.query(TransferRequest).filter(
                 and_(
                     TransferRequest.id == request_id,
                     TransferRequest.courier_id == courier_id,
-                    TransferRequest.status == 'courier_assigned'
+                    TransferRequest.status == 'courier_assigned',
+                    TransferRequest.company_id == company_id
                 )
             ).first()
             
@@ -182,14 +187,15 @@ class CourierRepository:
             print(f"Error confirmando pickup: {e}")
             return False
     
-    def confirm_delivery(self, request_id: int, courier_id: int, delivery_successful: bool, notes: str) -> bool:
-        """CO004: Confirmar entrega"""
+    def confirm_delivery(self, request_id: int, courier_id: int, delivery_successful: bool, notes: str, company_id: int) -> bool:
+        """CO004: Confirmar entrega - FILTRADO POR COMPANY_ID"""
         try:
             transfer = self.db.query(TransferRequest).filter(
                 and_(
                     TransferRequest.id == request_id,
                     TransferRequest.courier_id == courier_id,
-                    TransferRequest.status == 'in_transit'
+                    TransferRequest.status == 'in_transit',
+                    TransferRequest.company_id == company_id
                 )
             ).first()
             
@@ -211,16 +217,28 @@ class CourierRepository:
             print(f"Error confirmando entrega: {e}")
             return False
     
-    def report_incident(self, request_id: int, courier_id: int, incident_type: str, description: str) -> int:
-        """CO005: Reportar incidencia durante transporte"""
+    def report_incident(self, request_id: int, courier_id: int, incident_type: str, description: str, company_id: int) -> int:
+        """CO005: Reportar incidencia durante transporte - FILTRADO POR COMPANY_ID"""
         try:
+            # Verificar que la solicitud pertenece a la compañía
+            transfer = self.db.query(TransferRequest).filter(
+                and_(
+                    TransferRequest.id == request_id,
+                    TransferRequest.company_id == company_id
+                )
+            ).first()
+            
+            if not transfer:
+                return 0
+            
             incident = TransportIncident(
                 transfer_request_id=request_id,
                 courier_id=courier_id,
                 incident_type=incident_type,
                 description=description,
                 reported_at=datetime.now(),
-                resolved=False
+                resolved=False,
+                company_id=company_id
             )
             
             self.db.add(incident)
@@ -234,18 +252,24 @@ class CourierRepository:
             print(f"Error reportando incidencia: {e}")
             return 0
     
-    def get_my_transports(self, courier_id: int) -> List[Dict[str, Any]]:
-        """Obtener transportes asignados al corredor"""
+    def get_my_transports(self, courier_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """Obtener transportes asignados al corredor - FILTRADO POR COMPANY_ID"""
         transports = self.db.query(TransferRequest).filter(
-            TransferRequest.courier_id == courier_id,
-            TransferRequest.status.in_(['courier_assigned', 'in_transit', 'delivered'])
+            and_(
+                TransferRequest.courier_id == courier_id,
+                TransferRequest.company_id == company_id,
+                TransferRequest.status.in_(['courier_assigned', 'in_transit', 'delivered'])
+            )
         ).order_by(desc(TransferRequest.courier_accepted_at)).all()
         
         transport_list = []
         for transport in transports:
             # Consultar el producto correspondiente
             product = self.db.query(Product).filter(
-                Product.reference_code == transport.sneaker_reference_code
+                and_(
+                    Product.reference_code == transport.sneaker_reference_code,
+                    Product.company_id == company_id
+                )
             ).first()
 
             transport_dict = {
@@ -283,13 +307,14 @@ class CourierRepository:
         
         return transport_list
     
-    def get_delivery_history_today(self, courier_id: int) -> List[Dict[str, Any]]:
-        """CO006: Obtener historial de entregas del día"""
+    def get_delivery_history_today(self, courier_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """CO006: Obtener historial de entregas del día - FILTRADO POR COMPANY_ID"""
         today = date.today()
         
         deliveries = self.db.query(TransferRequest).filter(
             and_(
                 TransferRequest.courier_id == courier_id,
+                TransferRequest.company_id == company_id,
                 TransferRequest.status.in_(['delivered', 'completed', 'delivery_failed']),
                 func.date(TransferRequest.delivered_at) == today
             )

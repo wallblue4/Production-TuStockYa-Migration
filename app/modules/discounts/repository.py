@@ -11,9 +11,16 @@ class DiscountsRepository:
     def __init__(self, db: Session):
         self.db = db
     
-    def create_discount_request(self, seller_id: int, amount: Decimal, reason: str) -> DiscountRequest:
-        """Crear nueva solicitud de descuento"""
+    def create_discount_request(
+        self, 
+        seller_id: int, 
+        amount: float, 
+        reason: str,
+        company_id: int  # ✅ AGREGAR
+    ) -> DiscountRequest:
+        """Crear solicitud de descuento"""
         discount_request = DiscountRequest(
+            company_id=company_id,  # ✅ AGREGAR
             seller_id=seller_id,
             amount=amount,
             reason=reason,
@@ -27,73 +34,82 @@ class DiscountsRepository:
         
         return discount_request
     
-    def get_discount_requests_by_seller(self, seller_id: int) -> List[Dict[str, Any]]:
-        """Obtener solicitudes de descuento de un vendedor con info del admin"""
-        # Query como en el backend antiguo
-        query = self.db.query(
-            DiscountRequest.id,
-            DiscountRequest.seller_id,
-            DiscountRequest.amount,
-            DiscountRequest.reason,
-            DiscountRequest.status,
-            DiscountRequest.administrator_id,
-            DiscountRequest.requested_at,
-            DiscountRequest.reviewed_at,
-            DiscountRequest.admin_comments,
-            User.first_name.label('admin_first_name'),
-            User.last_name.label('admin_last_name')
-        ).outerjoin(
-            User, DiscountRequest.administrator_id == User.id
-        ).filter(
-            DiscountRequest.seller_id == seller_id
-        ).order_by(desc(DiscountRequest.requested_at))
-        
-        results = query.all()
-        
-        return [
-            {
-                "id": row.id,
-                "seller_id": row.seller_id,
-                "amount": float(row.amount),
-                "reason": row.reason,
-                "status": row.status,
-                "administrator_id": row.administrator_id,
-                "requested_at": row.requested_at.isoformat(),
-                "reviewed_at": row.reviewed_at.isoformat() if row.reviewed_at else None,
-                "admin_comments": row.admin_comments,
-                "admin_first_name": row.admin_first_name,
-                "admin_last_name": row.admin_last_name,
-                "admin_name": f"{row.admin_first_name} {row.admin_last_name}" if row.admin_first_name else None
-            }
-            for row in results
-        ]
-    
-    def get_pending_discount_requests(self, seller_id: int) -> List[DiscountRequest]:
-        """Obtener solicitudes pendientes del vendedor"""
+    def get_discount_requests_by_seller(
+        self, 
+        seller_id: int,
+        company_id: int  # ✅ AGREGAR
+    ) -> List[DiscountRequest]:
+        """Obtener solicitudes del vendedor - Solo de su compañía"""
         return self.db.query(DiscountRequest).filter(
             and_(
                 DiscountRequest.seller_id == seller_id,
-                DiscountRequest.status == 'pending'
+                DiscountRequest.company_id == company_id  # ✅ FILTRO CRÍTICO
             )
-        ).all()
+        ).order_by(DiscountRequest.requested_at.desc()).all()
     
-    def get_discount_requests_summary(self, seller_id: int) -> Dict[str, Any]:
-        """Obtener resumen de solicitudes de descuento"""
-        requests = self.get_discount_requests_by_seller(seller_id)
+    def get_discount_requests_summary(
+        self, 
+        seller_id: int,
+        company_id: int  # ✅ AGREGAR
+    ) -> Dict[str, int]:
+        """Resumen de solicitudes por estado"""
+        from sqlalchemy import func, case
         
-        summary = {
-            "total_requests": len(requests),
-            "pending": len([r for r in requests if r['status'] == 'pending']),
-            "approved": len([r for r in requests if r['status'] == 'approved']),
-            "rejected": len([r for r in requests if r['status'] == 'rejected']),
-            "total_amount_requested": sum(r['amount'] for r in requests),
-            "total_amount_approved": sum(r['amount'] for r in requests if r['status'] == 'approved'),
-            "approval_rate": 0.0
-        }
-        
-        if summary["total_requests"] > 0:
-            summary["approval_rate"] = round(
-                (summary["approved"] / summary["total_requests"]) * 100, 1
+        result = self.db.query(
+            func.count(case((DiscountRequest.status == 'pending', 1))).label('pending'),
+            func.count(case((DiscountRequest.status == 'approved', 1))).label('approved'),
+            func.count(case((DiscountRequest.status == 'rejected', 1))).label('rejected')
+        ).filter(
+            and_(
+                DiscountRequest.seller_id == seller_id,
+                DiscountRequest.company_id == company_id  # ✅ FILTRO CRÍTICO
             )
+        ).first()
         
-        return summary
+        return {
+            'pending': result.pending,
+            'approved': result.approved,
+            'rejected': result.rejected,
+            'total': result.pending + result.approved + result.rejected
+        }
+    
+    def get_pending_discount_requests(
+        self,
+        company_id: int  # ✅ AGREGAR
+    ) -> List[DiscountRequest]:
+        """Obtener solicitudes pendientes - Solo de la compañía"""
+        return self.db.query(DiscountRequest).filter(
+            and_(
+                DiscountRequest.status == 'pending',
+                DiscountRequest.company_id == company_id  # ✅ FILTRO CRÍTICO
+            )
+        ).order_by(DiscountRequest.requested_at).all()
+    
+    def approve_discount_request(
+        self,
+        request_id: int,
+        admin_id: int,
+        approved: bool,
+        admin_notes: str,
+        company_id: int  # ✅ AGREGAR
+    ) -> DiscountRequest:
+        """Aprobar/rechazar solicitud"""
+        discount_request = self.db.query(DiscountRequest).filter(
+            and_(
+                DiscountRequest.id == request_id,
+                DiscountRequest.company_id == company_id  # ✅ VALIDACIÓN DE SEGURIDAD
+            )
+        ).first()
+        
+        if not discount_request:
+            return None
+        
+        discount_request.status = 'approved' if approved else 'rejected'
+        discount_request.administrator_id = admin_id
+        discount_request.reviewed_at = datetime.now()
+        discount_request.admin_comments = admin_notes
+        
+        self.db.commit()
+        self.db.refresh(discount_request)
+        
+        return discount_request

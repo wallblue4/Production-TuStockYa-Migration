@@ -15,8 +15,12 @@ from .schemas import (
     CompanyCreate, CompanyUpdate, CompanyResponse, CompanyListItem,
     SubscriptionChangeCreate, InvoiceCreate, InvoiceMarkPaid,
     PlanTemplateCreate, GlobalMetrics, CompanyMetrics,
-    FirstSuperadminCreate
+    FirstSuperadminCreate , BossCreate, BossResponse, CompanyWithBossResponse
 )
+
+import logging
+logger = logging.getLogger(__name__)
+
 
 
 class SuperadminService:
@@ -76,7 +80,6 @@ class SuperadminService:
             legal_name=company.legal_name,
             tax_id=company.tax_id,
             email=company.email,
-            phone=company.phone,
             subscription_plan=company.subscription_plan,
             subscription_status=company.subscription_status,
             subscription_started_at=company.subscription_started_at,
@@ -547,3 +550,119 @@ class SuperadminService:
             "superadmin_id": superadmin.id,
             "email": superadmin.email
         }
+    
+    async def create_company_boss(
+        self,
+        company_id: int,
+        boss_data: BossCreate,
+        created_by_superadmin_id: int
+    ) -> BossResponse:
+        """
+        Crear el usuario Boss para una empresa
+        
+        Validaciones:
+        1. La empresa existe y está activa
+        2. NO existe ya un Boss para esta empresa
+        3. El email no está registrado en el sistema
+        4. Password cumple requisitos de seguridad
+        """
+        
+        # 1. Verificar que la empresa existe
+        company = self.repository.get_company(company_id)
+        if not company:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Empresa con ID {company_id} no encontrada"
+            )
+        
+        # 2. Verificar que la empresa está activa
+        if not company.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"La empresa '{company.name}' está inactiva. Actívala primero."
+            )
+        
+        # 3. Verificar que NO existe ya un Boss
+        if self.repository.boss_exists_for_company(company_id):
+            existing_boss = self.repository.get_company_boss(company_id)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Ya existe un Boss para esta empresa: {existing_boss.email}"
+            )
+        
+        # 4. Verificar que el email no está registrado
+        if self.repository.email_exists(boss_data.email):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"El email {boss_data.email} ya está registrado en el sistema"
+            )
+        
+        # 5. Crear usuario Boss
+        password_hash = AuthService.get_password_hash(boss_data.password)
+        
+        boss_user = User(
+            email=boss_data.email,
+            password_hash=password_hash,
+            first_name=boss_data.first_name,
+            last_name=boss_data.last_name,
+            role="boss",
+            company_id=company_id,
+            location_id=None,  # Boss no tiene ubicación específica
+            is_active=True,
+            created_by=created_by_superadmin_id
+        )
+        
+        boss_user = self.repository.create_boss_user(boss_user)
+        
+        # 6. Log de auditoría
+        logger.info(
+            f"✅ Boss creado: {boss_user.email} para empresa {company.name} "
+            f"por superadmin ID {created_by_superadmin_id}"
+        )
+        
+        # 7. Retornar respuesta
+        return BossResponse(
+            id=boss_user.id,
+            email=boss_user.email,
+            first_name=boss_user.first_name,
+            last_name=boss_user.last_name,
+            full_name=boss_user.full_name,
+            role=boss_user.role,
+            company_id=boss_user.company_id,
+            company_name=company.name,
+            is_active=boss_user.is_active,
+            created_at=boss_user.created_at,
+            created_by_superadmin_id=created_by_superadmin_id
+        )
+    
+    async def get_company_with_boss(self, company_id: int) -> CompanyWithBossResponse:
+        """Obtener empresa con su Boss (si existe)"""
+        company = self.repository.get_company(company_id)
+        if not company:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Empresa con ID {company_id} no encontrada"
+            )
+        
+        boss = self.repository.get_company_boss(company_id)
+        
+        boss_response = None
+        if boss:
+            boss_response = BossResponse(
+                id=boss.id,
+                email=boss.email,
+                first_name=boss.first_name,
+                last_name=boss.last_name,
+                full_name=boss.full_name,
+                role=boss.role,
+                company_id=boss.company_id,
+                company_name=company.name,
+                is_active=boss.is_active,
+                created_at=boss.created_at,
+                created_by_superadmin_id=boss.created_by
+            )
+        
+        return CompanyWithBossResponse(
+            company=CompanyResponse.model_validate(company),
+            boss=boss_response
+        )

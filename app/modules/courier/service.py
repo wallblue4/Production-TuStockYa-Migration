@@ -11,13 +11,14 @@ from .schemas import (
 )
 
 class CourierService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, company_id: int):
         self.db = db
+        self.company_id = company_id
         self.repository = CourierRepository(db)
     
     async def get_available_requests(self, courier_id: int, user_info: Dict[str, Any]) -> AvailableRequestsResponse:
         """CO001: Obtener solicitudes disponibles para corredor"""
-        requests = self.repository.get_available_requests_for_courier(courier_id)
+        requests = self.repository.get_available_requests_for_courier(courier_id, self.company_id)
         
         # Estadísticas como en backend antiguo
         breakdown = {
@@ -45,7 +46,7 @@ class CourierService:
         """CO002: Aceptar solicitud e iniciar recorrido"""
         
         success = self.repository.accept_courier_request(
-            request_id, courier_id, acceptance.estimated_pickup_time, acceptance.notes
+            request_id, courier_id, acceptance.estimated_pickup_time, acceptance.notes, self.company_id
         )
         
         if not success:
@@ -67,7 +68,7 @@ class CourierService:
     async def confirm_pickup(self, request_id: int, pickup_data: PickupConfirmation, courier_id: int) -> Dict[str, Any]:
         """CO003: Confirmar recolección"""
         
-        success = self.repository.confirm_pickup(request_id, courier_id, pickup_data.pickup_notes)
+        success = self.repository.confirm_pickup(request_id, courier_id, pickup_data.pickup_notes, self.company_id)
         
         if not success:
             raise HTTPException(status_code=404, detail="Solicitud no encontrada o no autorizada")
@@ -85,7 +86,7 @@ class CourierService:
         """CO004: Confirmar entrega"""
         
         success = self.repository.confirm_delivery(
-            request_id, courier_id, delivery_data.delivery_successful, delivery_data.notes
+            request_id, courier_id, delivery_data.delivery_successful, delivery_data.notes, self.company_id
         )
         
         if not success:
@@ -109,7 +110,7 @@ class CourierService:
         """CO005: Reportar incidencias durante el transporte"""
         
         incident_id = self.repository.report_incident(
-            request_id, courier_id, incident_data.incident_type, incident_data.description
+            request_id, courier_id, incident_data.incident_type, incident_data.description, self.company_id
         )
         
         if not incident_id:
@@ -131,7 +132,7 @@ class CourierService:
     
     async def get_my_transports(self, courier_id: int, user_info: Dict[str, Any]) -> MyTransportsResponse:
         """Obtener transportes asignados al corredor"""
-        transports = self.repository.get_my_transports(courier_id)
+        transports = self.repository.get_my_transports(courier_id, self.company_id)
         
         # Estadísticas del corredor
         total_transports = len(transports)
@@ -153,7 +154,7 @@ class CourierService:
     
     async def get_delivery_history(self, courier_id: int, user_info: Dict[str, Any]) -> DeliveryHistoryResponse:
         """CO006: Obtener historial de entregas del día"""
-        deliveries = self.repository.get_delivery_history_today(courier_id)
+        deliveries = self.repository.get_delivery_history_today(courier_id, self.company_id)
         
         # Estadísticas del día
         total_deliveries = len(deliveries)

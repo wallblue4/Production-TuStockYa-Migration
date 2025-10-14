@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query , Body , HTTPException , Path
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
-from app.core.auth.dependencies import require_roles
+from app.core.auth.dependencies import require_roles, get_current_company_id
 from .service import VendorService
 from .schemas import VendorDashboardResponse, TransferSummaryResponse, CompletedTransfersResponse , DeliveryNotes
 
@@ -12,6 +12,7 @@ router = APIRouter()
 @router.get("/dashboard", response_model=VendorDashboardResponse)
 async def get_vendor_dashboard(
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -27,7 +28,7 @@ async def get_vendor_dashboard(
     - Notificaciones de devolución
     - Acciones rápidas disponibles
     """
-    service = VendorService(db)
+    service = VendorService(db, current_company_id)
     
     # Información del usuario
     user_info = {
@@ -43,6 +44,7 @@ async def get_vendor_dashboard(
 @router.get("/pending-transfers", response_model=TransferSummaryResponse)
 async def get_vendor_pending_transfers(
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -54,12 +56,13 @@ async def get_vendor_pending_transfers(
     - Tiempo transcurrido desde entrega
     - Información del corredor
     """
-    service = VendorService(db)
+    service = VendorService(db, current_company_id)
     return await service.get_pending_transfers(current_user.id)
 
 @router.get("/completed-transfers", response_model=CompletedTransfersResponse)
 async def get_vendor_completed_transfers(
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -71,7 +74,7 @@ async def get_vendor_completed_transfers(
     - Duración promedio
     - Performance del vendedor
     """
-    service = VendorService(db)
+    service = VendorService(db, current_company_id)
     return await service.get_completed_transfers(current_user.id)
 
 @router.post("/confirm-reception/{request_id}")
@@ -81,7 +84,8 @@ async def confirm_reception(
     condition_ok: bool = Query(..., description="Condición del producto OK"),
     notes: str = Query("", description="Notas de recepción"),
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     VE008: Confirmar recepción de transferencia con actualización automática de inventario
@@ -99,12 +103,13 @@ async def confirm_reception(
     
     transfer_service = TransfersService(db)
     return await transfer_service.confirm_reception(
-        request_id, received_quantity, condition_ok, notes, current_user
+        request_id, received_quantity, condition_ok, notes, current_user, company_id
     )
 
 @router.get("/my-pickup-assignments")
 async def get_my_pickup_assignments(
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -132,7 +137,7 @@ async def get_my_pickup_assignments(
     - Contactar al bodeguero
     - Confirmar llegada con el producto
     """
-    service = VendorService(db)
+    service = VendorService(db, current_company_id)
     
     user_info = {
         'first_name': current_user.first_name,
@@ -148,6 +153,7 @@ async def deliver_return_to_warehouse(
     request_body: DeliveryNotes,
     return_id: int = Path(..., description="ID del return", gt=0), 
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -193,7 +199,7 @@ async def deliver_return_to_warehouse(
     }
     """
     # Inicialización del servicio de negocio
-    service = VendorService(db)
+    service = VendorService(db, current_company_id)
 
     try:
         # Llamada a la lógica del servicio

@@ -22,9 +22,9 @@ class WarehouseRepository:
         self.db = db
         logger.info("✅ WarehouseRepository inicializado")
     
-    def get_pending_requests_for_warehouse(self, warehouse_keeper_id: int) -> List[Dict[str, Any]]:
+    def get_pending_requests_for_warehouse(self, warehouse_keeper_id: int, company_id: int) -> List[Dict[str, Any]]:
         """
-        BG001: Obtener solicitudes pendientes para bodeguero
+        BG001: Obtener solicitudes pendientes para bodeguero - FILTRADO POR COMPANY_ID
         
         Retorna transferencias en estado 'pending' para ubicaciones
         que el bodeguero puede gestionar. 
@@ -36,7 +36,7 @@ class WarehouseRepository:
             logger.info(f"📋 Buscando solicitudes pendientes para bodeguero {warehouse_keeper_id}")
             
             # Obtener ubicaciones que este bodeguero puede gestionar
-            managed_locations = self.get_user_managed_locations(warehouse_keeper_id)
+            managed_locations = self.get_user_managed_locations(warehouse_keeper_id, company_id)
             location_ids = [loc['location_id'] for loc in managed_locations]
             
             if not location_ids:
@@ -79,6 +79,9 @@ class WarehouseRepository:
                     AND ps.location_name = sl.name
                 )
                 WHERE tr.status = 'pending'
+                AND tr.company_id = :company_id
+                AND sl.company_id = :company_id
+                AND dl.company_id = :company_id
                 AND (
                     -- Lógica para TRANSFERENCIAS (el bodeguero gestiona la ubicación de ORIGEN)
                     (tr.original_transfer_id IS NULL AND tr.source_location_id = ANY(:location_ids))
@@ -90,7 +93,7 @@ class WarehouseRepository:
                     tr.requested_at ASC
             """)
             
-            results = self.db.execute(query, {"location_ids": location_ids}).fetchall()
+            results = self.db.execute(query, {"location_ids": location_ids, "company_id": company_id}).fetchall()
             
             logger.info(f"✅ {len(results)} solicitudes pendientes encontradas")
             
@@ -174,20 +177,26 @@ class WarehouseRepository:
             logger.exception("❌ Error obteniendo solicitudes pendientes")
             return []
     
-    def get_user_managed_locations(self, user_id: int) -> List[Dict[str, Any]]:
-        """Obtener ubicaciones que un bodeguero puede gestionar"""
+    def get_user_managed_locations(self, user_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """Obtener ubicaciones que un bodeguero puede gestionar - FILTRADO POR COMPANY_ID"""
         try:
             # Obtener asignaciones de ubicaciones
             assignments = self.db.query(UserLocationAssignment).filter(
                 and_(
                     UserLocationAssignment.user_id == user_id,
+                    UserLocationAssignment.company_id == company_id,
                     UserLocationAssignment.is_active == True
                 )
             ).all()
             
             if not assignments:
                 # Si no tiene asignaciones, usar su location_id principal
-                user = self.db.query(User).filter(User.id == user_id).first()
+                user = self.db.query(User).filter(
+                    and_(
+                        User.id == user_id,
+                        User.company_id == company_id
+                    )
+                ).first()
                 if user and user.location_id:
                     return [{'location_id': user.location_id}]
                 return []
@@ -202,14 +211,18 @@ class WarehouseRepository:
         self, 
         request_id: int, 
         acceptance_data: Dict[str, Any], 
-        warehouse_keeper_id: int
+        warehouse_keeper_id: int,
+        company_id: int
     ) -> bool:
-        """BG002: Aceptar o rechazar solicitud de transferencia"""
+        """BG002: Aceptar o rechazar solicitud de transferencia - FILTRADO POR COMPANY_ID"""
         try:
             logger.info(f"✅ Aceptando solicitud {request_id}")
             
             transfer = self.db.query(TransferRequest).filter(
-                TransferRequest.id == request_id
+                and_(
+                    TransferRequest.id == request_id,
+                    TransferRequest.company_id == company_id
+                )
             ).first()
             
             if not transfer:
@@ -244,9 +257,9 @@ class WarehouseRepository:
     
    # app/modules/warehouse_new/repository.py - VERSIÓN MEJORADA
 
-    def get_accepted_requests_by_warehouse_keeper(self, warehouse_keeper_id: int) -> List[Dict[str, Any]]:
+    def get_accepted_requests_by_warehouse_keeper(self, warehouse_keeper_id: int, company_id: int) -> List[Dict[str, Any]]:
         """
-        Obtener solicitudes aceptadas por este bodeguero
+        Obtener solicitudes aceptadas por este bodeguero - FILTRADO POR COMPANY_ID
         
         Incluye:
         - Imagen del producto
@@ -263,6 +276,7 @@ class WarehouseRepository:
             transfers = self.db.query(TransferRequest).filter(
                 and_(
                     TransferRequest.warehouse_keeper_id == warehouse_keeper_id,
+                    TransferRequest.company_id == company_id,
                     TransferRequest.status.in_(active_statuses)
                 )
             ).order_by(
@@ -290,7 +304,8 @@ class WarehouseRepository:
                 # Obtener imagen del producto
                 product_image = self._get_product_image(
                     transfer.sneaker_reference_code,
-                    transfer.source_location_id
+                    transfer.source_location_id,
+                    company_id
                 )
                 
                 # Determinar tipo de transferencia
@@ -305,11 +320,17 @@ class WarehouseRepository:
                 
                 # Información de ubicaciones
                 source_location = self.db.query(Location).filter(
-                    Location.id == transfer.source_location_id
+                    and_(
+                        Location.id == transfer.source_location_id,
+                        Location.company_id == company_id
+                    )
                 ).first()
                 
                 destination_location = self.db.query(Location).filter(
-                    Location.id == transfer.destination_location_id
+                    and_(
+                        Location.id == transfer.destination_location_id,
+                        Location.company_id == company_id
+                    )
                 ).first()
                 
                 results.append({
@@ -451,13 +472,16 @@ class WarehouseRepository:
             'progress': 0
         })
 
-    def _get_product_image(self, reference_code: str, source_location_id: int) -> str:
+    def _get_product_image(self, reference_code: str, source_location_id: int, company_id: int) -> str:
         """
-        Obtener imagen del producto (reutilizar lógica del vendor repository)
+        Obtener imagen del producto - FILTRADO POR COMPANY_ID
         """
         try:
             source_location = self.db.query(Location).filter(
-                Location.id == source_location_id
+                and_(
+                    Location.id == source_location_id,
+                    Location.company_id == company_id
+                )
             ).first()
             
             if not source_location:
@@ -467,14 +491,18 @@ class WarehouseRepository:
             product = self.db.query(Product).filter(
                 and_(
                     Product.reference_code == reference_code,
-                    Product.location_name == source_location.name
+                    Product.location_name == source_location.name,
+                    Product.company_id == company_id
                 )
             ).first()
             
             # Si no existe o no tiene imagen, buscar global
             if not product or not product.image_url:
                 product = self.db.query(Product).filter(
-                    Product.reference_code == reference_code
+                    and_(
+                        Product.reference_code == reference_code,
+                        Product.company_id == company_id
+                    )
                 ).first()
             
             # Retornar imagen o placeholder
@@ -492,14 +520,17 @@ class WarehouseRepository:
         brand = reference_code.split('-')[0] if '-' in reference_code else 'Product'
         return f"https://via.placeholder.com/300x200?text={brand}+{reference_code}"
     
-    def get_inventory_by_location(self, location_id: int) -> List[Dict[str, Any]]:
-        """BG006: Consultar inventario por ubicación"""
+    def get_inventory_by_location(self, location_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """BG006: Consultar inventario por ubicación - FILTRADO POR COMPANY_ID"""
         try:
             logger.info(f"📊 Obteniendo inventario de ubicación {location_id}")
             
             # Obtener nombre real de ubicación
             location = self.db.query(Location).filter(
-                Location.id == location_id
+                and_(
+                    Location.id == location_id,
+                    Location.company_id == company_id
+                )
             ).first()
             
             if not location:
@@ -522,7 +553,11 @@ class WarehouseRepository:
                 ProductSize.quantity,
                 ProductSize.quantity_exhibition
             ).join(ProductSize).filter(
-                ProductSize.location_name == location_name
+                and_(
+                    ProductSize.location_name == location_name,
+                    Product.company_id == company_id,
+                    ProductSize.company_id == company_id
+                )
             ).order_by(
                 Product.brand, Product.model, ProductSize.size
             ).all()
@@ -555,10 +590,11 @@ class WarehouseRepository:
     def deliver_to_courier(
         self, 
         request_id: int, 
-        delivery_data: Dict[str, Any]
+        delivery_data: Dict[str, Any],
+        company_id: int
     ) -> Dict[str, Any]:
         """
-        BG003: Entregar producto a corredor con descuento automático de inventario
+        BG003: Entregar producto a corredor con descuento automático de inventario - FILTRADO POR COMPANY_ID
         
         VALIDACIONES:
         1. Transferencia existe y está en estado válido
@@ -575,7 +611,10 @@ class WarehouseRepository:
         logger.info(f"🔍 Validando transferencia {request_id}")
         
         transfer = self.db.query(TransferRequest).filter(
-            TransferRequest.id == request_id
+            and_(
+                TransferRequest.id == request_id,
+                TransferRequest.company_id == company_id
+            )
         ).with_for_update().first()  # ← LOCK: Evita procesamiento simultáneo
         
         if not transfer:
@@ -614,7 +653,10 @@ class WarehouseRepository:
         # ==================== VALIDACIÓN 2: UBICACIÓN ORIGEN ====================
         # ✅ OBTENER NOMBRE REAL DE UBICACIÓN
         source_location = self.db.query(Location).filter(
-            Location.id == transfer.source_location_id
+            and_(
+                Location.id == transfer.source_location_id,
+                Location.company_id == company_id
+            )
         ).first()
         
         if not source_location:
@@ -631,7 +673,9 @@ class WarehouseRepository:
             and_(
                 Product.reference_code == transfer.sneaker_reference_code,
                 ProductSize.size == transfer.size,
-                ProductSize.location_name == source_location_name  # ✅ NOMBRE REAL
+                ProductSize.location_name == source_location_name,  # ✅ NOMBRE REAL
+                Product.company_id == company_id,
+                ProductSize.company_id == company_id
             )
         ).with_for_update().first()  # ← LOCK: Evita descuento simultáneo
         
@@ -724,6 +768,7 @@ class WarehouseRepository:
             quantity_after=quantity_after,
             user_id=transfer.warehouse_keeper_id,
             reference_id=transfer.id,
+            company_id=company_id,
             notes=(
                 f"Entrega a corredor (ID: {transfer.courier_id}) - "
                 f"Transferencia #{transfer.id} - "
@@ -775,10 +820,11 @@ class WarehouseRepository:
     def deliver_to_vendor(
         self, 
         transfer_id: int, 
-        delivery_data: Dict[str, Any]
+        delivery_data: Dict[str, Any],
+        company_id: int
     ) -> Dict[str, Any]:
         """
-        Entregar producto directamente al vendedor (self-pickup)
+        Entregar producto directamente al vendedor (self-pickup) - FILTRADO POR COMPANY_ID
         Similar a deliver_to_courier pero sin corredor intermedio
         
         VALIDACIONES:
@@ -800,7 +846,10 @@ class WarehouseRepository:
         
         # ==================== VALIDACIÓN 1: TRANSFERENCIA EXISTE ====================
         transfer = self.db.query(TransferRequest).filter(
-            TransferRequest.id == transfer_id
+            and_(
+                TransferRequest.id == transfer_id,
+                TransferRequest.company_id == company_id
+            )
         ).first()
         
         if not transfer:
@@ -829,7 +878,10 @@ class WarehouseRepository:
     
         # ==================== OBTENER UBICACIÓN ORIGEN ====================
         source_location = self.db.query(Location).filter(
-            Location.id == transfer.source_location_id
+            and_(
+                Location.id == transfer.source_location_id,
+                Location.company_id == company_id
+            )
         ).first()
         
         if not source_location:
@@ -844,7 +896,9 @@ class WarehouseRepository:
             and_(
                 Product.reference_code == transfer.sneaker_reference_code,
                 ProductSize.size == transfer.size,
-                ProductSize.location_name == source_location_name
+                ProductSize.location_name == source_location_name,
+                Product.company_id == company_id,
+                ProductSize.company_id == company_id
             )
         ).first()
         
@@ -897,6 +951,7 @@ class WarehouseRepository:
             quantity_after=quantity_after,
             user_id=transfer.warehouse_keeper_id,
             reference_id=transfer.id,
+            company_id=company_id,
             notes=(
                 f"Entrega directa a vendedor (ID: {transfer.courier_id}) - "
                 f"Transferencia #{transfer.id} - "
@@ -957,10 +1012,11 @@ class WarehouseRepository:
         return_id: int,
         reception_data: Dict[str, Any],
         warehouse_keeper_id: int,
-        managed_location_ids: List[int]
+        managed_location_ids: List[int],
+        company_id: int
     ) -> Dict[str, Any]:
         """
-        BG010: Confirmar recepción de devolución con RESTAURACIÓN de inventario
+        BG010: Confirmar recepción de devolución con RESTAURACIÓN de inventario - FILTRADO POR COMPANY_ID
         
         FLUJO CORRECTO:
         1. Buscar Product GLOBAL (sin location_name) - SOLO UNA VEZ
@@ -974,7 +1030,10 @@ class WarehouseRepository:
             
             # ==================== VALIDACIÓN 1: OBTENER RETURN ====================
             return_transfer = self.db.query(TransferRequest).filter(
-                TransferRequest.id == return_id
+                and_(
+                    TransferRequest.id == return_id,
+                    TransferRequest.company_id == company_id
+                )
             ).first()
             
             if not return_transfer:
@@ -1000,7 +1059,10 @@ class WarehouseRepository:
             
             # ==================== OBTENER UBICACIÓN DESTINO (BODEGA) ====================
             destination_location = self.db.query(Location).filter(
-                Location.id == return_transfer.destination_location_id
+                and_(
+                    Location.id == return_transfer.destination_location_id,
+                    Location.company_id == company_id
+                )
             ).first()
             
             if not destination_location:
@@ -1012,7 +1074,10 @@ class WarehouseRepository:
             # ==================== BUSCAR PRODUCTO GLOBAL (SIN LOCATION) ====================
             # ✅ CORRECTO: Buscar Product SIN filtrar por location_name
             product = self.db.query(Product).filter(
-                Product.reference_code == return_transfer.sneaker_reference_code
+                and_(
+                    Product.reference_code == return_transfer.sneaker_reference_code,
+                    Product.company_id == company_id
+                )
             ).first()
             
             if not product:
@@ -1032,7 +1097,8 @@ class WarehouseRepository:
                 and_(
                     ProductSize.product_id == product.id,
                     ProductSize.size == return_transfer.size,
-                    ProductSize.location_name == destination_location_name  # ← BODEGA
+                    ProductSize.location_name == destination_location_name,  # ← BODEGA
+                    ProductSize.company_id == company_id
                 )
             ).with_for_update().first()  # ← LOCK para evitar race conditions
             
@@ -1057,6 +1123,7 @@ class WarehouseRepository:
                     quantity=reception_data['received_quantity'],
                     quantity_exhibition=0,
                     location_name=destination_location_name,  # ← BODEGA
+                    company_id=company_id,
                     created_at=datetime.now(),
                     updated_at=datetime.now()
                 )
@@ -1115,6 +1182,7 @@ class WarehouseRepository:
                 quantity_after=quantity_after,
                 user_id=warehouse_keeper_id,
                 reference_id=return_id,
+                company_id=company_id,
                 notes=(
                     f"DEVOLUCIÓN recibida - Transfer original #{return_transfer.original_transfer_id}\n"
                     f"Ubicación: {destination_location_name}\n"

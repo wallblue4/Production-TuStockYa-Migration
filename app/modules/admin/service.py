@@ -32,8 +32,9 @@ class AdminService:
     Servicio principal para todas las operaciones del administrador
     """
     
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, company_id: int):
         self.db = db
+        self.company_id = company_id
         self.repository = AdminRepository(db)
         self.video_client = VideoMicroserviceClient()
     
@@ -184,7 +185,7 @@ class AdminService:
         requested_location_ids: Optional[List[int]] = None
     ) -> List[int]:
         """Filtrar solo ubicaciones gestionadas"""
-        managed_locations = self.repository.get_managed_locations(admin.id)
+        managed_locations = self.repository.get_managed_locations(admin.id, self.company_id)
         managed_ids = [loc.id for loc in managed_locations]
         
         if requested_location_ids:
@@ -223,7 +224,7 @@ class AdminService:
     
     async def _get_managed_user_ids(self, admin: User) -> List[int]:
         """Obtener IDs de usuarios gestionados"""
-        managed_users = self.repository.get_users_by_admin(admin.id)
+        managed_users = self.repository.get_users_by_admin(admin.id, self.company_id)
         return [user.id for user in managed_users]
     
     # ==================== AD005 & AD006: ASIGNAR USUARIOS ====================
@@ -281,6 +282,7 @@ class AdminService:
         # Crear asignación
         assignment_dict = assignment_data.dict()
         assignment_dict["assigned_by_user_id"] = boss.id
+        assignment_dict["company_id"] = self.company_id
         
         db_assignment = self.repository.create_admin_assignment(assignment_dict)
         
@@ -315,7 +317,7 @@ class AdminService:
                 "ver configuraciones de costos"
             )
             
-            costs_data = self.repository.get_cost_configurations(location_id)
+            costs_data = self.repository.get_cost_configurations(location_id, self.company_id)
             
             # Filtrar por tipo de costo si se especifica
             if cost_type:
@@ -329,7 +331,7 @@ class AdminService:
             
             all_costs = []
             for loc_id in managed_location_ids:
-                location_costs = self.repository.get_cost_configurations(loc_id)
+                location_costs = self.repository.get_cost_configurations(loc_id, self.company_id)
                 
                 # Filtrar por tipo si se especifica
                 if cost_type:
@@ -371,7 +373,7 @@ class AdminService:
         Obtener asignaciones de ubicaciones del administrador actual
         """
         
-        assignments = self.repository.get_admin_assignments(admin.id)
+        assignments = self.repository.get_admin_assignments(admin.id, self.company_id)
         
         return [
             AdminLocationAssignmentResponse(
@@ -528,7 +530,7 @@ class AdminService:
         Remover asignación de administrador a ubicación
         """
         
-        success = self.repository.remove_admin_assignment(admin_id, location_id)
+        success = self.repository.remove_admin_assignment(admin_id, location_id, self.company_id)
         
         if not success:
             raise HTTPException(
@@ -695,7 +697,7 @@ class AdminService:
         AD002: Supervisar múltiples bodegas bajo su responsabilidad
         """
         
-        locations = self.repository.get_managed_locations(admin.id)
+        locations = self.repository.get_managed_locations(admin.id, self.company_id)
         
         location_responses = []
         for location in locations:
@@ -759,7 +761,7 @@ class AdminService:
         
         # Continuar con lógica de negocio
         cost_data = cost_config.dict()
-        result = self.repository.create_cost_configuration(cost_data, admin.id)
+        result = self.repository.create_cost_configuration(cost_data, admin.id, self.company_id)
         
         return CostResponse(
             id=result["id"],
@@ -802,7 +804,7 @@ class AdminService:
             sale_dict = sale_data.dict()
             sale_dict["processed_by_user_id"] = admin.id
             
-            db_sale = self.repository.create_wholesale_sale(sale_dict)
+            db_sale = self.repository.create_wholesale_sale(sale_dict, admin.id, self.company_id)
             
             return WholesaleSaleResponse(
                 id=db_sale.id,
@@ -1004,7 +1006,7 @@ class AdminService:
             }
         
         # Obtener overview de transferencias
-        return self.repository.get_transfers_overview(managed_location_ids)
+        return self.repository.get_transfers_overview(managed_location_ids, self.company_id)
     
     # ==================== AD014: SUPERVISAR PERFORMANCE ====================
     
@@ -1124,7 +1126,7 @@ class AdminService:
         managed_location_ids = await self._filter_managed_locations(admin)
         managed_user_ids = await self._get_managed_user_ids(admin)
 
-        dashboard_data = self.repository.get_admin_dashboard_data(admin.id)
+        dashboard_data = self.repository.get_admin_dashboard_data(admin.id, self.company_id)
         
         managed_locations = [
             LocationStats(
@@ -1734,7 +1736,7 @@ class AdminService:
             )
         
         # Obtener estadísticas
-        stats = self.repository.get_location_stats(location_id, start_date, end_date)
+        stats = self.repository.get_location_stats(location_id, start_date, end_date, self.company_id)
         
         if not stats:
             raise HTTPException(

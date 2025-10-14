@@ -65,7 +65,7 @@ class SalesRepository:
             # PASO 2: VALIDAR Y RESERVAR stock (SELECT FOR UPDATE)
             logger.info(f"Reservando stock para {len(inventory_items)} items")
             reserved_products = self.inventory_service.validate_and_reserve_stock(
-                self.db, inventory_items, location_name
+                self.db, inventory_items, location_name, company_id
             )
             logger.info(f"Stock reservado exitosamente")
             
@@ -134,7 +134,7 @@ class SalesRepository:
             # PASO 6: ACTUALIZAR INVENTARIO
             logger.info("Actualizando inventario")
             self.inventory_service.update_reserved_stock(
-                self.db, reserved_products, inventory_items, seller_id, sale.id
+                self.db, reserved_products, inventory_items, seller_id, sale.id ,company_id
             )
             logger.info("Inventario actualizado")
             

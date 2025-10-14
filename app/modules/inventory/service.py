@@ -6,18 +6,19 @@ from .repository import InventoryRepository
 from .schemas import ProductResponse, InventorySearchParams, InventoryByRoleParams, GroupedInventoryResponse, LocationInventoryResponse, LocationInfo, ProductInfo, SimpleInventoryResponse, SimpleLocationInventory
 
 class InventoryService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, company_id: int):
         self.db = db
+        self.company_id = company_id
         self.repository = InventoryRepository(db)
 
     async def search_inventory(self, search_params: InventorySearchParams) -> List[ProductResponse]:
         """Buscar productos en inventario según criterios"""
         try:
-            products = self.repository.search_products(search_params)
+            products = self.repository.search_products(search_params, self.company_id)
             
             result = []
             for product in products:
-                sizes = self.repository.get_product_sizes(product.id)
+                sizes = self.repository.get_product_sizes(product.id, self.company_id)
                 sizes_data = [
                     {
                         "size": size.size,
@@ -59,11 +60,11 @@ class InventoryService:
     async def get_warehouse_keeper_inventory(self, user_id: int, search_params: InventoryByRoleParams) -> List[ProductResponse]:
         """Obtener inventario para bodeguero - solo bodegas asignadas"""
         try:
-            products = self.repository.search_products_by_warehouse_keeper(user_id, search_params)
+            products = self.repository.search_products_by_warehouse_keeper(user_id, search_params, self.company_id)
             
             result = []
             for product in products:
-                sizes = self.repository.get_product_sizes(product.id)
+                sizes = self.repository.get_product_sizes(product.id, self.company_id)
                 sizes_data = [
                     {
                         "size": size.size,
@@ -105,11 +106,11 @@ class InventoryService:
     async def get_admin_inventory(self, user_id: int, search_params: InventoryByRoleParams) -> List[ProductResponse]:
         """Obtener inventario para administrador - locales y bodegas asignadas"""
         try:
-            products = self.repository.search_products_by_admin(user_id, search_params)
+            products = self.repository.search_products_by_admin(user_id, search_params, self.company_id)
             
             result = []
             for product in products:
-                sizes = self.repository.get_product_sizes(product.id)
+                sizes = self.repository.get_product_sizes(product.id, self.company_id)
                 sizes_data = [
                     {
                         "size": size.size,
@@ -151,11 +152,11 @@ class InventoryService:
     async def get_all_warehouse_keeper_inventory(self, user_id: int) -> List[ProductResponse]:
         """Obtener TODOS los productos para bodeguero - solo bodegas asignadas"""
         try:
-            products = self.repository.get_all_products_by_warehouse_keeper(user_id)
+            products = self.repository.get_all_products_by_warehouse_keeper(user_id, self.company_id)
             
             result = []
             for product in products:
-                sizes = self.repository.get_product_sizes(product.id)
+                sizes = self.repository.get_product_sizes(product.id, self.company_id)
                 sizes_data = [
                     {
                         "size": size.size,
@@ -197,11 +198,11 @@ class InventoryService:
     async def get_all_admin_inventory(self, user_id: int) -> List[ProductResponse]:
         """Obtener TODOS los productos para administrador - locales y bodegas asignadas"""
         try:
-            products = self.repository.get_all_products_by_admin(user_id)
+            products = self.repository.get_all_products_by_admin(user_id, self.company_id)
             
             result = []
             for product in products:
-                sizes = self.repository.get_product_sizes(product.id)
+                sizes = self.repository.get_product_sizes(product.id, self.company_id)
                 sizes_data = [
                     {
                         "size": size.size,
@@ -242,7 +243,7 @@ class InventoryService:
 
     def _create_product_info(self, product) -> ProductInfo:
         """Crear ProductInfo desde un producto"""
-        sizes = self.repository.get_product_sizes(product.id)
+        sizes = self.repository.get_product_sizes(product.id, self.company_id)
         sizes_data = [
             {
                 "size": size.size,
@@ -274,7 +275,7 @@ class InventoryService:
         """Obtener inventario agrupado por ubicación para bodeguero"""
         try:
             # Obtener ubicaciones asignadas (solo bodegas)
-            locations = self.repository.get_warehouse_locations_info(user_id)
+            locations = self.repository.get_warehouse_locations_info(user_id, self.company_id)
             
             if not locations:
                 return GroupedInventoryResponse(
@@ -290,7 +291,7 @@ class InventoryService:
             
             for location in locations:
                 # Obtener productos de esta ubicación
-                products = self.repository.get_products_by_location(location.name)
+                products = self.repository.get_products_by_location(location.name, self.company_id)
                 
                 # Convertir productos a ProductInfo
                 product_infos = [self._create_product_info(product) for product in products]
@@ -334,7 +335,7 @@ class InventoryService:
         """Obtener inventario agrupado por ubicación para administrador"""
         try:
             # Obtener ubicaciones asignadas (locales y bodegas)
-            locations = self.repository.get_admin_locations_info(user_id)
+            locations = self.repository.get_admin_locations_info(user_id, self.company_id)
             
             if not locations:
                 return GroupedInventoryResponse(
@@ -350,7 +351,7 @@ class InventoryService:
             
             for location in locations:
                 # Obtener productos de esta ubicación
-                products = self.repository.get_products_by_location(location.name)
+                products = self.repository.get_products_by_location(location.name, self.company_id)
                 
                 # Convertir productos a ProductInfo
                 product_infos = [self._create_product_info(product) for product in products]
@@ -417,7 +418,7 @@ class InventoryService:
         """Obtener inventario simplificado para bodeguero - estructura por ubicación"""
         try:
             # Obtener ubicaciones asignadas (solo bodegas)
-            locations = self.repository.get_warehouse_locations_info(user_id)
+            locations = self.repository.get_warehouse_locations_info(user_id, self.company_id)
             
             if not locations:
                 return SimpleInventoryResponse(
@@ -430,7 +431,7 @@ class InventoryService:
             
             for location in locations:
                 # Obtener productos con tallas agrupadas
-                products_with_sizes = self.repository.get_products_with_sizes_by_location(location.name)
+                products_with_sizes = self.repository.get_products_with_sizes_by_location(location.name, self.company_id)
                 
                 # Convertir a ProductResponse
                 product_responses = [
@@ -463,7 +464,7 @@ class InventoryService:
         """Obtener inventario simplificado para administrador - estructura por ubicación"""
         try:
             # Obtener ubicaciones asignadas (locales y bodegas)
-            locations = self.repository.get_admin_locations_info(user_id)
+            locations = self.repository.get_admin_locations_info(user_id, self.company_id)
             
             if not locations:
                 return SimpleInventoryResponse(
@@ -476,7 +477,7 @@ class InventoryService:
             
             for location in locations:
                 # Obtener productos con tallas agrupadas
-                products_with_sizes = self.repository.get_products_with_sizes_by_location(location.name)
+                products_with_sizes = self.repository.get_products_with_sizes_by_location(location.name, self.company_id)
                 
                 # Convertir a ProductResponse
                 product_responses = [

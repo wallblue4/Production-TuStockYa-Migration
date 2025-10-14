@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, Query
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
-from app.core.auth.dependencies import require_roles
+from app.core.auth.dependencies import require_roles, get_current_company_id
 from .service import ClassificationService
 from .schemas import ScanResponse
 
@@ -14,6 +14,7 @@ async def scan_product(
     image: UploadFile = File(..., description="Imagen del producto a escanear"),
     include_transfer_options: bool = Query(True, description="Incluir opciones de transferencia"),
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -33,7 +34,7 @@ async def scan_product(
     - Opciones de transferencia
     - Información de precios
     """
-    service = ClassificationService(db)
+    service = ClassificationService(db, current_company_id)
     return await service.scan_product(image, current_user, include_transfer_options)
 
 @router.get("/health")

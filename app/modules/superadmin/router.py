@@ -1,5 +1,5 @@
 # app/modules/superadmin/router.py
-from fastapi import APIRouter, Depends, Query, Path, Body, status
+from fastapi import APIRouter, Depends, Query, Path, Body, status , HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -12,7 +12,7 @@ from .schemas import (
     SubscriptionChangeCreate, InvoiceMarkPaid,
     PlanTemplateCreate, PlanTemplateResponse,
     GlobalMetrics, CompanyMetrics,
-    FirstSuperadminCreate
+    FirstSuperadminCreate, BossCreate, BossResponse, CompanyWithBossResponse
 )
 
 router = APIRouter()
@@ -632,3 +632,110 @@ async def superadmin_health():
             "SU006 - Reportes financieros (en desarrollo)"
         ]
     }
+
+@router.post("/companies/{company_id}/boss", response_model=BossResponse, status_code=status.HTTP_201_CREATED)
+async def create_company_boss(
+    company_id: int = Path(..., description="ID de la empresa"),
+    boss_data: BossCreate = Body(...),
+    current_user: User = Depends(get_superadmin_user),
+    db: Session = Depends(get_db)
+):
+    """
+    **SU001: Crear usuario Boss para una empresa**
+    
+    Crea el usuario Boss (dueño/director ejecutivo) de una empresa.
+    Solo puede existir UN Boss por empresa.
+    
+    **Proceso:**
+    1. Valida que la empresa existe y está activa
+    2. Verifica que NO exista ya un Boss para esta empresa
+    3. Valida que el email no esté registrado
+    4. Crea el usuario con rol 'boss'
+    5. Asocia el usuario a la empresa
+    
+    **Siguiente paso en el flujo:**
+    - El Boss podrá iniciar sesión
+    - El Boss podrá crear locales (BS008)
+    - El Boss podrá crear bodegas (BS009)
+    - El Boss podrá crear y asignar administradores (BS011)
+    
+    **Validaciones:**
+    - Solo un Boss por empresa
+    - Email único en todo el sistema
+    - Password con requisitos de seguridad
+    - Empresa activa
+    
+    **Permisos:** Solo superadmin
+    """
+    service = SuperadminService(db)
+    return await service.create_company_boss(company_id, boss_data, current_user.id)
+
+
+@router.get("/companies/{company_id}/with-boss", response_model=CompanyWithBossResponse)
+async def get_company_with_boss(
+    company_id: int = Path(..., description="ID de la empresa"),
+    current_user: User = Depends(get_superadmin_user),
+    db: Session = Depends(get_db)
+):
+    """
+    **SU001: Obtener empresa con su usuario Boss**
+    
+    Obtiene la información completa de una empresa incluyendo
+    su usuario Boss (si ya fue creado).
+    
+    **Útil para:**
+    - Verificar si una empresa ya tiene Boss
+    - Obtener información del Boss existente
+    - Validar el flujo de configuración inicial
+    
+    **Permisos:** Solo superadmin
+    """
+    service = SuperadminService(db)
+    return await service.get_company_with_boss(company_id)
+
+
+@router.get("/companies/{company_id}/boss", response_model=BossResponse)
+async def get_company_boss(
+    company_id: int = Path(..., description="ID de la empresa"),
+    current_user: User = Depends(get_superadmin_user),
+    db: Session = Depends(get_db)
+):
+    """
+    **SU001: Obtener solo el usuario Boss de una empresa**
+    
+    Retorna únicamente la información del Boss.
+    
+    **Error 404 si:** No existe Boss para la empresa
+    
+    **Permisos:** Solo superadmin
+    """
+    service = SuperadminService(db)
+    company = service.repository.get_company(company_id)
+    
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Empresa con ID {company_id} no encontrada"
+        )
+    
+    boss = service.repository.get_company_boss(company_id)
+    
+    if not boss:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No existe Boss para la empresa '{company.name}'. Créalo primero."
+        )
+    
+    return BossResponse(
+        id=boss.id,
+        email=boss.email,
+        first_name=boss.first_name,
+        last_name=boss.last_name,
+        full_name=boss.full_name,
+        role=boss.role,
+        company_id=boss.company_id,
+        company_name=company.name,
+        is_active=boss.is_active,
+        created_at=boss.created_at,
+        created_by_superadmin_id=boss.created_by
+    )

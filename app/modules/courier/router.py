@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Path
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
-from app.core.auth.dependencies import require_roles
+from app.core.auth.dependencies import require_roles, get_current_company_id
 from .service import CourierService
 from .schemas import (
     CourierAcceptance, PickupConfirmation, DeliveryConfirmation, TransportIncidentReport,
@@ -15,6 +15,7 @@ router = APIRouter()
 @router.get("/available-requests", response_model=AvailableRequestsResponse)
 async def get_available_requests(
     current_user = Depends(require_roles(["corredor", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -33,7 +34,7 @@ async def get_available_requests(
     - Nivel de urgencia y prioridad
     - Contexto de la ruta (transferencia vs devolución)
     """
-    service = CourierService(db)
+    service = CourierService(db, current_company_id)
     
     user_info = {
         'first_name': current_user.first_name,
@@ -47,6 +48,7 @@ async def accept_request(
     request_id: int = Path(..., description="ID de la solicitud"),
     acceptance: CourierAcceptance = CourierAcceptance(),
     current_user = Depends(require_roles(["corredor", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -63,7 +65,7 @@ async def accept_request(
     - Sistema previene race conditions
     - Primera llegada toma la solicitud
     """
-    service = CourierService(db)
+    service = CourierService(db, current_company_id)
     return await service.accept_request(request_id, acceptance, current_user.id)
 
 @router.post("/confirm-pickup/{request_id}")
@@ -71,6 +73,7 @@ async def confirm_pickup(
     request_id: int = Path(..., description="ID de la solicitud"),
     pickup_data: PickupConfirmation = PickupConfirmation(),
     current_user = Depends(require_roles(["corredor", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -86,7 +89,7 @@ async def confirm_pickup(
     - Solo el corredor asignado puede confirmar
     - Solicitud debe estar en estado 'courier_assigned'
     """
-    service = CourierService(db)
+    service = CourierService(db, current_company_id)
     return await service.confirm_pickup(request_id, pickup_data, current_user.id)
 
 @router.post("/confirm-delivery/{request_id}")
@@ -94,6 +97,7 @@ async def confirm_delivery(
     request_id: int = Path(..., description="ID de la solicitud"),
     delivery_data: DeliveryConfirmation = DeliveryConfirmation(),
     current_user = Depends(require_roles(["corredor", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -109,7 +113,7 @@ async def confirm_delivery(
     - Entrega exitosa: Producto entregado en buenas condiciones
     - Entrega con problemas: Daños, cliente ausente, dirección incorrecta
     """
-    service = CourierService(db)
+    service = CourierService(db, current_company_id)
     return await service.confirm_delivery(request_id, delivery_data, current_user.id)
 
 @router.post("/report-incident")
@@ -117,6 +121,7 @@ async def report_incident(
     request_id: int,
     incident_data: TransportIncidentReport,
     current_user = Depends(require_roles(["corredor", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -135,12 +140,13 @@ async def report_incident(
     - Corredor puede continuar con entrega si es posible
     - Soporte revisa y da seguimiento
     """
-    service = CourierService(db)
+    service = CourierService(db, current_company_id)
     return await service.report_incident(request_id, incident_data, current_user.id)
 
 @router.get("/my-transports", response_model=MyTransportsResponse)
 async def get_my_transports(
     current_user = Depends(require_roles(["corredor", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -152,7 +158,7 @@ async def get_my_transports(
     - Estadísticas de performance
     - Información de tiempos
     """
-    service = CourierService(db)
+    service = CourierService(db, current_company_id)
     
     user_info = {
         'first_name': current_user.first_name,
@@ -164,6 +170,7 @@ async def get_my_transports(
 @router.get("/my-deliveries", response_model=DeliveryHistoryResponse)
 async def get_my_deliveries(
     current_user = Depends(require_roles(["corredor", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -175,7 +182,7 @@ async def get_my_deliveries(
     - Métricas de performance
     - Evaluación de eficiencia
     """
-    service = CourierService(db)
+    service = CourierService(db, current_company_id)
     
     user_info = {
         'first_name': current_user.first_name,

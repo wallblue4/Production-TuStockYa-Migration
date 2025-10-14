@@ -236,9 +236,10 @@ class TransfersRepository:
             
             logger.info(f"✅ Transferencia encontrada: {transfer.sneaker_reference_code}")
             
-            # ✅ OBTENER NOMBRE REAL DE UBICACIÓN DESTINO
+            # ✅ OBTENER NOMBRE REAL DE UBICACIÓN DESTINO + MULTI-TENANT
             destination_location = self.db.query(Location).filter(
-                Location.id == transfer.destination_location_id
+                Location.id == transfer.destination_location_id,
+                Location.company_id == company_id  # ✅ MULTI-TENANT
             ).first()
             
             if not destination_location:
@@ -262,7 +263,8 @@ class TransfersRepository:
                 
                 # Buscar producto GLOBAL (sin location_name si ya corregiste el modelo)
                 product = self.db.query(Product).filter(
-                    Product.reference_code == transfer.sneaker_reference_code
+                    Product.reference_code == transfer.sneaker_reference_code,
+                    Product.company_id == company_id
                 ).first()
                 
                 # Si no existe producto global, buscar por location (compatible con BD actual)
@@ -271,7 +273,8 @@ class TransfersRepository:
                     product = self.db.query(Product).filter(
                         and_(
                             Product.reference_code == transfer.sneaker_reference_code,
-                            Product.location_name == destination_location_name
+                            Product.location_name == destination_location_name,
+                            Product.company_id == company_id
                         )
                     ).first()
                 
@@ -290,7 +293,9 @@ class TransfersRepository:
                         unit_price=0,
                         box_price=0,
                         is_active=1,
-                        created_at=datetime.now()
+                        created_at=datetime.now(),
+                        company_id=company_id
+
                     )
                     self.db.add(product)
                     self.db.flush()
@@ -301,7 +306,8 @@ class TransfersRepository:
                     and_(
                         ProductSize.product_id == product.id,
                         ProductSize.size == transfer.size,
-                        ProductSize.location_name == destination_location_name  # ✅ NOMBRE REAL
+                        ProductSize.location_name == destination_location_name ,
+                        ProductSize.company_id == company_id  
                     )
                 ).first()
                 
@@ -324,7 +330,9 @@ class TransfersRepository:
                         quantity_exhibition=0,
                         location_name=destination_location_name,  # ✅ NOMBRE REAL
                         created_at=datetime.now(),
-                        updated_at=datetime.now()
+                        updated_at=datetime.now(),
+                        company_id=company_id
+
                     )
                     self.db.add(product_size)
                     logger.info(
@@ -344,7 +352,9 @@ class TransfersRepository:
                     user_id=user_id,
                     reference_id=transfer_id,
                     notes=f"Recepción de transferencia #{transfer_id} en '{destination_location_name}' - {notes}",
-                    created_at=datetime.now()
+                    created_at=datetime.now(),
+                    company_id=company_id
+
                 )
                 self.db.add(inventory_change)
                 

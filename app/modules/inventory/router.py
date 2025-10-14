@@ -41,10 +41,11 @@ async def get_warehouse_keeper_inventory(
     size: Optional[str] = None,
     is_active: Optional[int] = None,
     current_user = Depends(require_roles(["bodeguero"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """Obtener inventario para bodeguero - solo bodegas asignadas"""
-    service = InventoryService(db)
+    service = InventoryService(db, current_company_id)
     search_params = InventoryByRoleParams(
         reference_code=reference_code,
         brand=brand,
@@ -62,10 +63,11 @@ async def get_admin_inventory(
     size: Optional[str] = None,
     is_active: Optional[int] = None,
     current_user = Depends(require_roles(["administrador"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """Obtener inventario para administrador - locales y bodegas asignadas"""
-    service = InventoryService(db)
+    service = InventoryService(db, current_company_id)
     search_params = InventoryByRoleParams(
         reference_code=reference_code,
         brand=brand,
@@ -78,19 +80,21 @@ async def get_admin_inventory(
 @router.get("/warehouse-keeper/inventory/all", response_model=SimpleInventoryResponse)
 async def get_all_warehouse_keeper_inventory(
     current_user = Depends(require_roles(["bodeguero"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """Obtener TODO el inventario para bodeguero - solo bodegas asignadas con estructura simplificada"""
-    service = InventoryService(db)
+    service = InventoryService(db, current_company_id)
     return await service.get_simple_warehouse_keeper_inventory(current_user.id)
 
 @router.get("/admin/inventory/all", response_model=SimpleInventoryResponse)
 async def get_all_admin_inventory(
     current_user = Depends(require_roles(["administrador"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """Obtener TODO el inventario para administrador - locales y bodegas asignadas con estructura simplificada"""
-    service = InventoryService(db)
+    service = InventoryService(db, current_company_id)
     return await service.get_simple_admin_inventory(current_user.id)
 
 @router.get("/health")

@@ -8,10 +8,13 @@ class ClassificationRepository:
     def __init__(self, db: Session):
         self.db = db
     
-    def search_products_by_reference(self, reference_code: str) -> List[Dict[str, Any]]:
-        """Buscar productos por código de referencia"""
+    def search_products_by_reference(self, reference_code: str, company_id: int) -> List[Dict[str, Any]]:
+        """Buscar productos por código de referencia - FILTRADO POR COMPANY_ID"""
         products = self.db.query(Product).filter(
-            Product.reference_code.ilike(f"%{reference_code}%")
+            and_(
+                Product.company_id == company_id,
+                Product.reference_code.ilike(f"%{reference_code}%")
+            )
         ).limit(10).all()
         
         return [
@@ -29,15 +32,17 @@ class ClassificationRepository:
             for p in products
         ]
     
-    def get_product_availability(self, product_id: int, user_location: str) -> Dict[str, Any]:
-        """Obtener disponibilidad de producto por ubicaciones"""
+    def get_product_availability(self, product_id: int, user_location: str, company_id: int) -> Dict[str, Any]:
+        """Obtener disponibilidad de producto por ubicaciones - FILTRADO POR COMPANY_ID"""
         # Stock en ubicación actual con JOIN para obtener location_id
         current_stock = self.db.query(ProductSize, Location.id.label('location_id')).join(
             Location, ProductSize.location_name == Location.name
         ).filter(
             and_(
                 ProductSize.product_id == product_id,
-                ProductSize.location_name == user_location
+                ProductSize.company_id == company_id,
+                ProductSize.location_name == user_location,
+                Location.company_id == company_id
             )
         ).all()
         
@@ -47,8 +52,10 @@ class ClassificationRepository:
         ).filter(
             and_(
                 ProductSize.product_id == product_id,
+                ProductSize.company_id == company_id,
                 ProductSize.location_name != user_location,
-                ProductSize.quantity > 0
+                ProductSize.quantity > 0,
+                Location.company_id == company_id
             )
         ).all()
         
@@ -73,12 +80,15 @@ class ClassificationRepository:
             ]
         }
     
-    def search_similar_products(self, brand: str, model: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Buscar productos similares por marca y modelo"""
+    def search_similar_products(self, brand: str, model: str, company_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+        """Buscar productos similares por marca y modelo - FILTRADO POR COMPANY_ID"""
         similar = self.db.query(Product).filter(
-            or_(
-                and_(Product.brand.ilike(f"%{brand}%"), Product.model.ilike(f"%{model}%")),
-                Product.brand.ilike(f"%{brand}%")
+            and_(
+                Product.company_id == company_id,
+                or_(
+                    and_(Product.brand.ilike(f"%{brand}%"), Product.model.ilike(f"%{model}%")),
+                    Product.brand.ilike(f"%{brand}%")
+                )
             )
         ).limit(limit).all()
         
@@ -92,9 +102,9 @@ class ClassificationRepository:
             for p in similar
         ]
     
-    def search_products_by_description(self, model_name: str, brand: str = None) -> List[Dict[str, Any]]:
-        """Buscar productos por descripción y marca"""
-        query = self.db.query(Product)
+    def search_products_by_description(self, model_name: str, brand: str = None, company_id: int = None) -> List[Dict[str, Any]]:
+        """Buscar productos por descripción y marca - FILTRADO POR COMPANY_ID"""
+        query = self.db.query(Product).filter(Product.company_id == company_id)
         
         # ✅ BÚSQUEDA FLEXIBLE
         conditions = or_(

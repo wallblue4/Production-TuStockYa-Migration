@@ -4,7 +4,7 @@ from typing import List, Optional
 from datetime import date
 
 from app.config.database import get_db
-from app.core.auth.dependencies import require_roles
+from app.core.auth.dependencies import require_roles, get_current_company_id
 from app.shared.database.models import User
 from .cost_service import CostService
 from .schemas import (
@@ -22,6 +22,7 @@ router = APIRouter(prefix="/costs", tags=["Gestión de Costos"])
 async def create_cost_configuration(
     cost_config: CostConfigurationCreate,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -40,13 +41,14 @@ async def create_cost_configuration(
     - quarterly: Trimestral
     - annual: Anual
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     return await service.create_cost_configuration(cost_config, current_user)
 
 
 @router.get("/operational-dashboard", response_model=OperationalDashboard)
 async def get_operational_dashboard(
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -65,7 +67,7 @@ async def get_operational_dashboard(
     - Planificación de flujo de efectivo
     - Seguimiento operativo general
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     return await service.get_operational_dashboard(current_user)
 
 
@@ -75,6 +77,7 @@ async def get_cost_configurations(
     location_id: Optional[int] = Query(None, description="Filtrar por ubicación"),
     cost_type: Optional[CostType] = Query(None, description="Filtrar por tipo de costo"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -88,7 +91,7 @@ async def get_cost_configurations(
     - Solo muestra ubicaciones bajo gestión del administrador
     - BOSS puede ver todas las ubicaciones
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     cost_type_value = cost_type.value if cost_type else None
     return await service.get_cost_configurations(
         current_user, location_id, cost_type_value
@@ -98,12 +101,13 @@ async def get_cost_configurations(
 async def get_cost_configuration_by_id(
     cost_id: int,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
     Obtener configuración específica por ID
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     configs = await service.get_cost_configurations(current_user)
     
     for config in configs:
@@ -117,6 +121,7 @@ async def update_cost_configuration(
     cost_id: int,
     cost_update: CostConfigurationUpdate,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -129,7 +134,7 @@ async def update_cost_configuration(
     - is_active: Estado activo/inactivo
     - end_date: Fecha de finalización
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     return await service.update_cost_configuration(cost_id, cost_update, current_user)
 
 @router.patch("/{cost_id}/update-amount", response_model=CostOperationResponse)
@@ -137,6 +142,7 @@ async def update_cost_amount(
     cost_id: int,
     update_request: UpdateAmountRequest,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -152,7 +158,7 @@ async def update_cost_amount(
     - Cambios de tarifa
     - Renegociación de contratos
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     return await service.update_cost_amount(cost_id, update_request, current_user)
 
 @router.patch("/{cost_id}/deactivate", response_model=CostOperationResponse)
@@ -160,6 +166,7 @@ async def deactivate_cost_configuration(
     cost_id: int,
     end_date: Optional[date] = Query(None, description="Fecha de finalización"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -171,7 +178,7 @@ async def deactivate_cost_configuration(
     - Mantiene integridad referencial
     - Auditoría completa
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     return await service.deactivate_cost_configuration(cost_id, current_user, end_date)
 
 @router.delete("/{cost_id}", response_model=CostOperationResponse)
@@ -179,6 +186,7 @@ async def delete_cost_configuration(
     cost_id: int,
     force_delete: bool = Query(False, description="Forzar eliminación incluso con pagos"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -192,7 +200,7 @@ async def delete_cost_configuration(
     **Recomendación:**
     - Use deactivate en lugar de delete para preservar historial
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     return await service.delete_cost_configuration(cost_id, current_user, force_delete)
 
 # ==================== PAGOS ====================
@@ -201,6 +209,7 @@ async def delete_cost_configuration(
 async def register_cost_payment(
     payment_data: CostPaymentCreate,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -219,7 +228,7 @@ async def register_cost_payment(
     - payment_date: Fecha real del pago
     - payment_method: Método utilizado
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     return await service.register_payment(payment_data, current_user)
 
 # ==================== DASHBOARDS ====================
@@ -228,6 +237,7 @@ async def register_cost_payment(
 async def get_location_cost_dashboard(
     location_id: int,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -246,7 +256,7 @@ async def get_location_cost_dashboard(
     - Consultas optimizadas con índices
     - Respuesta típica: 20-50ms
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     return await service.get_location_cost_dashboard(location_id, current_user)
 
 
@@ -256,6 +266,7 @@ async def get_location_cost_dashboard(
 async def analyze_cost_deletion_impact(
     cost_id: int,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -272,13 +283,14 @@ async def analyze_cost_deletion_impact(
     - Consultar siempre antes de eliminar
     - Tomar decisión informada sobre acción
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     return await service.analyze_deletion_impact(cost_id, current_user)
 
 @router.get("/alerts/overdue")
 async def get_overdue_alerts(
     location_id: Optional[int] = Query(None, description="Filtrar por ubicación"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -295,7 +307,7 @@ async def get_overdue_alerts(
     - high: 8-15 días vencidos  
     - critical: 15+ días vencidos
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     dashboard = await service.get_operational_dashboard(current_user)
     
     alerts = dashboard.critical_alerts
@@ -309,6 +321,7 @@ async def get_upcoming_payments_summary(
     days_ahead: int = Query(7, description="Días hacia adelante"),
     location_id: Optional[int] = Query(None, description="Filtrar por ubicación"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -324,7 +337,7 @@ async def get_upcoming_payments_summary(
     - days_ahead: Ventana de tiempo (default: 7 días)
     - location_id: Ubicación específica (opcional)
     """
-    service = CostService(db)
+    service = CostService(db, current_company_id)
     dashboard = await service.get_operational_dashboard(current_user)
     
     upcoming = dashboard.upcoming_week

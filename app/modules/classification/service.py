@@ -10,8 +10,9 @@ from .repository import ClassificationRepository
 from .schemas import ProductMatch
 
 class ClassificationService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, company_id: int):
         self.db = db
+        self.company_id = company_id
         self.repository = ClassificationRepository(db)
         self.microservice_url = "https://sneaker-api-v2.onrender.com"
     
@@ -121,17 +122,18 @@ class ClassificationService:
             else:
                 final_brand = original_brand
             
-            # Buscar producto en inventario
+            # Buscar producto en inventario - FILTRADO POR COMPANY_ID
             local_products = self.repository.search_products_by_description(
                 model_name=model_name,
-                brand=final_brand
+                brand=final_brand,
+                company_id=self.company_id
             )
             
             if local_products:
                 # ✅ PRODUCTO ENCONTRADO EN INVENTARIO
                 product = local_products[0]
                 availability = self.repository.get_product_availability(
-                    product['id'], f"Local #{current_user.location_id}"
+                    product['id'], f"Local #{current_user.location_id}", self.company_id
                 )
                 
                 match = {
@@ -284,7 +286,8 @@ class ClassificationService:
         """Obtener sugerencias para el producto"""
         similar_products = self.repository.search_similar_products(
             product['brand'], 
-            product['model']
+            product['model'],
+            company_id=self.company_id
         )
         
         return {

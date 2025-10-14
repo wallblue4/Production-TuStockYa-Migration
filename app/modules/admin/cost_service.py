@@ -16,8 +16,9 @@ from .schemas import (
 class CostService:
     """Servicio principal para gestión de costos"""
     
-    def __init__(self, db):
+    def __init__(self, db, company_id: int):
         self.db = db
+        self.company_id = company_id
         self.repository = CostRepository(db)
         self.calculator = CostCalculatorService(self.repository)
     
@@ -36,13 +37,13 @@ class CostService:
         )
         
         # Verificar si ya existe configuración activa del mismo tipo
-        existing_configs = self.repository.get_active_cost_configurations(cost_config.location_id)
+        existing_configs = self.repository.get_active_cost_configurations(cost_config.location_id, self.company_id)
         existing_types = {config["cost_type"] for config in existing_configs}
         
         
         # Crear configuración
         cost_data = cost_config.dict()
-        result = self.repository.create_cost_configuration(cost_data, admin.id)
+        result = self.repository.create_cost_configuration(cost_data, admin.id, self.company_id)
         
         # Construir respuesta
         return CostConfigurationResponse(
@@ -71,7 +72,7 @@ class CostService:
         """Actualizar configuración existente"""
         
         # Obtener configuración actual
-        current_config = self.repository.get_cost_configuration_by_id(cost_id)
+        current_config = self.repository.get_cost_configuration_by_id(cost_id, self.company_id)
         if not current_config:
             raise HTTPException(status_code=404, detail="Configuración no encontrada")
         
@@ -82,7 +83,7 @@ class CostService:
         
         # Aplicar actualización
         update_data = cost_update.dict(exclude_unset=True)
-        result = self.repository.update_cost_configuration(cost_id, update_data)
+        result = self.repository.update_cost_configuration(cost_id, update_data, self.company_id)
         
         return CostConfigurationResponse(**result)
     
@@ -104,7 +105,7 @@ class CostService:
         
         # Verificar que no hay pagos realizados después de la fecha efectiva
         future_payments = self.repository.get_paid_payments_for_config(
-            cost_id, update_request.effective_date, date(2030, 12, 31)
+            cost_id, update_request.effective_date, date(2030, 12, 31), self.company_id
         )
         
         if future_payments:
@@ -120,7 +121,7 @@ class CostService:
             "updated_at": datetime.now()
         }
         
-        self.repository.update_cost_configuration(cost_id, update_data)
+        self.repository.update_cost_configuration(cost_id, update_data, self.company_id)
         
         return CostOperationResponse(
             success=True,
@@ -144,10 +145,10 @@ class CostService:
         if location_id:
             # Validar acceso a ubicación específica
             await self._validate_location_access(admin, location_id, "ver costos")
-            configs = self.repository.get_active_cost_configurations(location_id)
+            configs = self.repository.get_active_cost_configurations(location_id, self.company_id)
         else:
             # Obtener de todas las ubicaciones gestionadas
-            configs = self.repository.get_cost_configurations_by_admin(admin.id)
+            configs = self.repository.get_cost_configurations_by_admin(admin.id, self.company_id)
         
         # Filtrar por tipo si se especifica
         if cost_type:
@@ -191,7 +192,7 @@ class CostService:
         payment_dict = payment_data.dict()
         payment_dict["paid_by_user_id"] = admin.id
         
-        result = self.repository.create_payment_record(payment_dict)
+        result = self.repository.create_payment_record(payment_dict, self.company_id)
         
         return CostPaymentResponse(
             id=result["id"],
@@ -243,8 +244,8 @@ class CostService:
         await self._validate_location_access(admin, config["location_id"], "analizar eliminación")
         
         # Obtener datos para análisis
-        paid_payments = self.repository.get_all_paid_payments_for_config(cost_id)
-        exceptions = self.repository.get_all_payment_exceptions_for_config(cost_id)
+        paid_payments = self.repository.get_all_paid_payments_for_config(cost_id, self.company_id)
+        exceptions = self.repository.get_all_payment_exceptions_for_config(cost_id, self.company_id)
         
         # Calcular vencimientos futuros
         today = date.today()
@@ -289,7 +290,7 @@ class CostService:
             "updated_at": datetime.now()
         }
         
-        self.repository.update_cost_configuration(cost_id, update_data)
+        self.repository.update_cost_configuration(cost_id, update_data, self.company_id)
         
         return CostOperationResponse(
             success=True,
@@ -334,9 +335,9 @@ class CostService:
             archive_id = await self._archive_cost_data(cost_id, admin.id)
             
             # Eliminar en orden correcto
-            self.repository.delete_payment_exceptions_for_config(cost_id)
-            self.repository.delete_paid_payments_for_config(cost_id)
-            self.repository.delete_cost_configuration(cost_id)
+            self.repository.delete_payment_exceptions_for_config(cost_id, self.company_id)
+            self.repository.delete_paid_payments_for_config(cost_id, self.company_id)
+            self.repository.delete_cost_configuration(cost_id, self.company_id)
             
             return CostOperationResponse(
                 success=True,
@@ -352,8 +353,8 @@ class CostService:
             )
         else:
             # Eliminación segura sin pagos
-            self.repository.delete_payment_exceptions_for_config(cost_id)
-            self.repository.delete_cost_configuration(cost_id)
+            self.repository.delete_payment_exceptions_for_config(cost_id, self.company_id)
+            self.repository.delete_cost_configuration(cost_id, self.company_id)
             
             return CostOperationResponse(
                 success=True,
@@ -383,7 +384,7 @@ class CostService:
             return location
         
         # Para administradores, verificar asignación
-        managed_locations = self.repository.get_managed_locations_for_admin(admin.id)
+        managed_locations = self.repository.get_managed_locations_for_admin(admin.id, self.company_id)
         managed_location_ids = {loc["id"] for loc in managed_locations}
         
         if location_id not in managed_location_ids:
@@ -411,4 +412,4 @@ class CostService:
            "deletion_reason": "force_delete_with_payments"
        }
        
-       return self.repository.create_deletion_archive_record(archive_data)
+       return self.repository.create_deletion_archive_record(archive_data, self.company_id)

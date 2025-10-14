@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Path , HTTPException, Body
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
-from app.core.auth.dependencies import require_roles
+from app.core.auth.dependencies import require_roles, get_current_company_id
 from .service import WarehouseService
 from .schemas import (
     WarehouseRequestAcceptance, CourierDelivery, 
@@ -19,6 +19,7 @@ router = APIRouter()
 @router.get("/pending-requests", response_model=PendingRequestsResponse)
 async def get_pending_requests(
     current_user = Depends(require_roles(["bodeguero", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -37,7 +38,7 @@ async def get_pending_requests(
     - Ubicaciones origen y destino
     - Nivel de urgencia y prioridad
     """
-    service = WarehouseService(db)
+    service = WarehouseService(db, current_company_id)
     
     user_info = {
         'first_name': current_user.first_name,
@@ -50,6 +51,7 @@ async def get_pending_requests(
 async def accept_request(
     acceptance: WarehouseRequestAcceptance,
     current_user = Depends(require_roles(["bodeguero", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -66,12 +68,13 @@ async def accept_request(
     - Verificación de disponibilidad de stock
     - Solicitud debe estar en estado 'pending'
     """
-    service = WarehouseService(db)
+    service = WarehouseService(db, current_company_id)
     return await service.accept_request(acceptance, current_user.id)
 
 @router.get("/accepted-requests", response_model=AcceptedRequestsResponse)
 async def get_accepted_requests(
     current_user = Depends(require_roles(["bodeguero", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -83,7 +86,7 @@ async def get_accepted_requests(
     - Información de corredor asignado cuando disponible
     - Productos listos para entrega
     """
-    service = WarehouseService(db)
+    service = WarehouseService(db, current_company_id)
     
     user_info = {
         'first_name': current_user.first_name,
@@ -96,6 +99,7 @@ async def get_accepted_requests(
 async def deliver_to_courier(
     delivery: CourierDelivery,
     current_user = Depends(require_roles(["bodeguero", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -114,7 +118,7 @@ async def deliver_to_courier(
     3. Sistema descuenta inventario automáticamente
     4. Producto queda en tránsito hacia destino
     """
-    service = WarehouseService(db)
+    service = WarehouseService(db, current_company_id)
     
     try:
         result = await service.deliver_to_courier(delivery, current_user.id)
@@ -130,6 +134,7 @@ async def deliver_to_courier(
 async def get_inventory_by_location(
     location_id: int = Path(..., description="ID de la ubicación"),
     current_user = Depends(require_roles(["bodeguero", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -143,7 +148,7 @@ async def get_inventory_by_location(
     - Valor total del inventario
     - Estado de stock por producto
     """
-    service = WarehouseService(db)
+    service = WarehouseService(db, current_company_id)
     return await service.get_inventory_by_location(location_id)
 
 @router.post("/deliver-to-vendor/{transfer_id}")
@@ -151,6 +156,7 @@ async def deliver_to_vendor(
     transfer_id: int = Path(..., description="ID de la transferencia", gt=0),
     delivery: VendorDelivery = Body(...),
     current_user = Depends(require_roles(["bodeguero", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -185,7 +191,7 @@ async def deliver_to_vendor(
     - Vendedor actúa como su propio transportista
     - Flujo más corto (sin estado 'courier_assigned')
     """
-    service = WarehouseService(db)
+    service = WarehouseService(db, current_company_id)
     
     try:
         result = await service.deliver_to_vendor(transfer_id, delivery, current_user.id)
@@ -206,6 +212,7 @@ async def confirm_return_reception(
     return_id: int = Path(..., description="ID de la devolución", gt=0),
     reception: ReturnReceptionConfirmation = Body(...),
     current_user = Depends(require_roles(["bodeguero", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -246,7 +253,7 @@ async def confirm_return_reception(
     damaged + quality_check_passed=True → Inventario con nota de daño
     unusable → NO regresa a inventario (pérdida registrada)
     """
-    service = WarehouseService(db)
+    service = WarehouseService(db, current_company_id)
     
     try:
         # ✅ CORRECCIÓN: service.confirm_return_reception() YA retorna el dict completo

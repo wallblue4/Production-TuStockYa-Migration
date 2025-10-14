@@ -182,6 +182,7 @@ class Location(Base):
     phone = Column(String(50))
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.current_timestamp())
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     
     # Relationships
     company = relationship("Company", back_populates="locations")
@@ -189,6 +190,7 @@ class Location(Base):
     expenses = relationship("Expense", back_populates="location")
     sales = relationship("Sale", back_populates="location")
     cost_configurations = relationship("CostConfiguration", back_populates="location")
+    created_by_user = relationship("User", foreign_keys=[created_by])
     # NO agregar 'products' porque Product usa location_name (String) no location_id
 
 
@@ -212,6 +214,7 @@ class User(Base):
     location_id = Column(Integer, ForeignKey("locations.id"))
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.current_timestamp())
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     
     # Relationships
     company = relationship("Company", back_populates="users", foreign_keys=[company_id])
@@ -219,7 +222,7 @@ class User(Base):
     sales = relationship("Sale", back_populates="seller", foreign_keys="Sale.seller_id")
     expenses = relationship("Expense", back_populates="user")
     location_assignments = relationship("UserLocationAssignment", back_populates="user")
-    
+    created_by_user = relationship("User", foreign_keys=[created_by])
     created_cost_configurations = relationship("CostConfiguration", foreign_keys="CostConfiguration.created_by_user_id", back_populates="created_by")
     paid_cost_payments = relationship("CostPayment", foreign_keys="CostPayment.paid_by_user_id", back_populates="paid_by")
     created_cost_exceptions = relationship("CostPaymentException", foreign_keys="CostPaymentException.created_by_user_id", back_populates="created_by")

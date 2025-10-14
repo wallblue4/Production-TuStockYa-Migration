@@ -13,7 +13,8 @@ class InventoryService:
     def validate_and_reserve_stock(
         db: Session, 
         items: List[Dict[str, Any]], 
-        location_name: str
+        location_name: str,
+        company_id: int
     ) -> List[Tuple[ProductSize, Product]]:
         """
         Validar y reservar stock atómicamente con bloqueo pesimista.
@@ -22,11 +23,13 @@ class InventoryService:
         - SELECT FOR UPDATE previene race conditions
         - JOIN único para obtener Product y ProductSize juntos
         - Validación completa antes de modificar datos
+        - MULTI-TENANT: Filtra por company_id
         
         Args:
             db: Sesión de base de datos
             items: Items a validar [{sneaker_reference_code, size, quantity}]
             location_name: Nombre de la ubicación
+            company_id: ID de la compañía (MULTI-TENANT)
             
         Returns:
             List[(ProductSize, Product)]: Productos reservados con sus datos
@@ -38,14 +41,16 @@ class InventoryService:
         unavailable = []
         
         for item in items:
-            # Query optimizado: JOIN + SELECT FOR UPDATE en una sola consulta
+            # Query optimizado: JOIN + SELECT FOR UPDATE en una sola consulta + MULTI-TENANT
             result = db.query(ProductSize, Product).join(
                 Product, ProductSize.product_id == Product.id
             ).filter(
                 and_(
                     Product.reference_code == item['sneaker_reference_code'],
                     ProductSize.size == item['size'],
-                    ProductSize.location_name == location_name
+                    ProductSize.location_name == location_name,
+                    Product.company_id == company_id,
+                    ProductSize.company_id == company_id
                 )
             ).with_for_update().first()
             
@@ -80,7 +85,8 @@ class InventoryService:
         reserved_products: List[Tuple[ProductSize, Product]],
         items: List[Dict[str, Any]],
         user_id: int,
-        sale_id: int
+        sale_id: int,
+        company_id: int
     ) -> None:
         """
         Actualizar stock de productos YA RESERVADOS.
@@ -110,7 +116,8 @@ class InventoryService:
                 user_id=user_id,
                 reference_id=sale_id,
                 notes=f"Venta #{sale_id}",
-                created_at=datetime.now()
+                created_at=datetime.now(),
+                company_id=company_id
             )
             inventory_changes.append(inventory_change)
         
@@ -122,18 +129,22 @@ class InventoryService:
         db: Session, 
         reference_code: str, 
         size: str, 
-        location_name: str
+        location_name: str,
+        company_id: int
     ) -> Dict[str, Any]:
         """
         Verificar disponibilidad SIN bloquear (solo lectura).
         
         Optimización: Query simple sin JOIN innecesario
+        MULTI-TENANT: Filtra por company_id
         """
         product_size = db.query(ProductSize).join(Product).filter(
             and_(
                 Product.reference_code == reference_code,
                 ProductSize.size == size,
-                ProductSize.location_name == location_name
+                ProductSize.location_name == location_name,
+                Product.company_id == company_id,
+                ProductSize.company_id == company_id
             )
         ).first()
         
@@ -150,12 +161,14 @@ class InventoryService:
     def get_products_stock_batch(
         db: Session,
         reference_codes: List[str],
-        location_name: str
+        location_name: str,
+        company_id: int
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         Obtener stock de múltiples productos en una sola query.
         
         Optimización: Query único en vez de N queries
+        MULTI-TENANT: Filtra por company_id
         
         Returns:
             Dict[reference_code, List[{size, quantity, quantity_exhibition}]]
@@ -170,7 +183,9 @@ class InventoryService:
         ).filter(
             and_(
                 Product.reference_code.in_(reference_codes),
-                ProductSize.location_name == location_name
+                ProductSize.location_name == location_name,
+                Product.company_id == company_id,
+                ProductSize.company_id == company_id
             )
         ).all()
         

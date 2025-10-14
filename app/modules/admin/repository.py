@@ -42,9 +42,12 @@ class AdminRepository:
         return db_user
     
     
-    def update_user(self, user_id: int, update_data: dict) -> Optional[User]:
-        """Actualizar usuario"""
-        user = self.db.query(User).filter(User.id == user_id).first()
+    def update_user(self, user_id: int, update_data: dict, company_id: int) -> Optional[User]:
+        """Actualizar usuario - MULTI-TENANT"""
+        user = self.db.query(User).filter(
+            User.id == user_id,
+            User.company_id == company_id
+        ).first()
         if user:
             for key, value in update_data.items():
                 if hasattr(user, key) and value is not None:
@@ -54,13 +57,14 @@ class AdminRepository:
         return user
 
     def create_admin_assignment(self, assignment_data: dict) -> AdminLocationAssignment:
-        """Crear asignación de administrador a ubicación"""
+        """Crear asignación de administrador a ubicación - MULTI-TENANT"""
         
         # Verificar si ya existe la asignación
         existing = self.db.query(AdminLocationAssignment)\
             .filter(
                 AdminLocationAssignment.admin_id == assignment_data["admin_id"],
-                AdminLocationAssignment.location_id == assignment_data["location_id"]
+                AdminLocationAssignment.location_id == assignment_data["location_id"],
+                AdminLocationAssignment.company_id == assignment_data["company_id"]
             ).first()
         
         if existing:
@@ -80,23 +84,28 @@ class AdminRepository:
         self.db.refresh(assignment)
         return assignment
     
-    def get_admin_assignments(self, admin_id: int) -> List[AdminLocationAssignment]:
-        """Obtener asignaciones de un administrador"""
+    def get_admin_assignments(self, admin_id: int, company_id: int) -> List[AdminLocationAssignment]:
+        """Obtener asignaciones de un administrador - MULTI-TENANT"""
         return self.db.query(AdminLocationAssignment)\
             .filter(
                 AdminLocationAssignment.admin_id == admin_id,
-                AdminLocationAssignment.is_active == True
+                AdminLocationAssignment.is_active == True,
+                AdminLocationAssignment.company_id == company_id
             )\
             .join(Location, AdminLocationAssignment.location_id == Location.id)\
-            .filter(Location.is_active == True)\
+            .filter(
+                Location.is_active == True,
+                Location.company_id == company_id
+            )\
             .all()
     
-    def remove_admin_assignment(self, admin_id: int, location_id: int) -> bool:
-        """Remover asignación de administrador"""
+    def remove_admin_assignment(self, admin_id: int, location_id: int, company_id: int) -> bool:
+        """Remover asignación de administrador - MULTI-TENANT"""
         assignment = self.db.query(AdminLocationAssignment)\
             .filter(
                 AdminLocationAssignment.admin_id == admin_id,
-                AdminLocationAssignment.location_id == location_id
+                AdminLocationAssignment.location_id == location_id,
+                AdminLocationAssignment.company_id == company_id
             ).first()
         
         if assignment:
@@ -107,45 +116,48 @@ class AdminRepository:
     
     # ==================== MÉTODOS CORREGIDOS ====================
     
-    def get_managed_locations(self, admin_id: int) -> List[Location]:
-        """Obtener ubicaciones gestionadas por el administrador - CORREGIDO"""
+    def get_managed_locations(self, admin_id: int, company_id: int) -> List[Location]:
+        """Obtener ubicaciones gestionadas por el administrador - CORREGIDO + MULTI-TENANT"""
         
-        # Si es BOSS, puede ver todas las ubicaciones
-        admin = self.db.query(User).filter(User.id == admin_id).first()
+        # Si es BOSS, puede ver todas las ubicaciones de su compañía
+        admin = self.db.query(User).filter(User.id == admin_id, User.company_id == company_id).first()
         if admin and admin.role == "boss":
             return self.db.query(Location)\
-                .filter(Location.is_active == True)\
+                .filter(Location.is_active == True, Location.company_id == company_id)\
                 .order_by(Location.name)\
                 .all()
         
-        # Para administradores, solo ubicaciones asignadas
+        # Para administradores, solo ubicaciones asignadas de su compañía
         return self.db.query(Location)\
             .join(AdminLocationAssignment, Location.id == AdminLocationAssignment.location_id)\
             .filter(
                 AdminLocationAssignment.admin_id == admin_id,
                 AdminLocationAssignment.is_active == True,
-                Location.is_active == True
+                AdminLocationAssignment.company_id == company_id,
+                Location.is_active == True,
+                Location.company_id == company_id
             )\
             .order_by(Location.name)\
             .all()
     
-    def get_users_by_admin(self, admin_id: int) -> List[User]:
-        """Obtener usuarios gestionados por un administrador - """
+    def get_users_by_admin(self, admin_id: int, company_id: int) -> List[User]:
+        """Obtener usuarios gestionados por un administrador - MULTI-TENANT"""
         
-        # Si es BOSS, puede ver todos los usuarios
-        admin = self.db.query(User).filter(User.id == admin_id).first()
+        # Si es BOSS, puede ver todos los usuarios de su compañía
+        admin = self.db.query(User).filter(User.id == admin_id, User.company_id == company_id).first()
         if admin and admin.role == "boss":
             return self.db.query(User)\
                 .filter(User.role.in_(["vendedor", "bodeguero", "corredor", "administrador"]))\
-                .filter(User.is_active == True)\
+                .filter(User.is_active == True, User.company_id == company_id)\
                 .order_by(User.created_at.desc())\
                 .all()
         
-        # Para administradores, solo usuarios en ubicaciones asignadas
+        # Para administradores, solo usuarios en ubicaciones asignadas de su compañía
         managed_location_ids = self.db.query(AdminLocationAssignment.location_id)\
             .filter(
                 AdminLocationAssignment.admin_id == admin_id,
-                AdminLocationAssignment.is_active == True
+                AdminLocationAssignment.is_active == True,
+                AdminLocationAssignment.company_id == company_id
             ).subquery()
         
         return self.db.query(User)\
@@ -153,18 +165,28 @@ class AdminRepository:
             .filter(
                 UserLocationAssignment.location_id.in_(managed_location_ids),
                 UserLocationAssignment.is_active == True,
-                User.role.in_(["vendedor", "bodeguero", "corredor"])
+                UserLocationAssignment.company_id == company_id,
+                User.role.in_(["vendedor", "bodeguero", "corredor"]),
+                User.company_id == company_id
             )\
             .distinct()\
             .order_by(User.created_at.desc())\
             .all()
     
     def assign_user_to_location(self, assignment_data: dict) -> Dict[str, Any]:
-        """Asignar usuario a ubicación"""
+        """Asignar usuario a ubicación - MULTI-TENANT"""
         
-        # Verificar que usuario y ubicación existen
-        user = self.db.query(User).filter(User.id == assignment_data["user_id"]).first()
-        location = self.db.query(Location).filter(Location.id == assignment_data["location_id"]).first()
+        company_id = assignment_data.get("company_id")
+        
+        # Verificar que usuario y ubicación existen y pertenecen a la compañía
+        user = self.db.query(User).filter(
+            User.id == assignment_data["user_id"],
+            User.company_id == company_id
+        ).first()
+        location = self.db.query(Location).filter(
+            Location.id == assignment_data["location_id"],
+            Location.company_id == company_id
+        ).first()
         
         if not user or not location:
             return {"success": False, "error": "Usuario o ubicación no encontrados"}
@@ -177,6 +199,7 @@ class AdminRepository:
             assignment = UserLocationAssignment(
                 user_id=assignment_data["user_id"],
                 location_id=assignment_data["location_id"],
+                company_id=company_id,
                 role_in_location=assignment_data.get("role_in_location"),
                 start_date=assignment_data.get("start_date", date.today()),
                 notes=assignment_data.get("notes")
@@ -197,10 +220,13 @@ class AdminRepository:
     # ==================== GESTIÓN DE UBICACIONES ====================
     
     
-    def get_location_stats(self, location_id: int, start_date: date, end_date: date) -> Dict[str, Any]:
-        """Obtener estadísticas de una ubicación - CORREGIDO"""
+    def get_location_stats(self, location_id: int, start_date: date, end_date: date, company_id: int) -> Dict[str, Any]:
+        """Obtener estadísticas de una ubicación - MULTI-TENANT"""
         
-        location = self.db.query(Location).filter(Location.id == location_id).first()
+        location = self.db.query(Location).filter(
+            Location.id == location_id,
+            Location.company_id == company_id
+        ).first()
         if not location:
             return {}
         
@@ -209,6 +235,7 @@ class AdminRepository:
             sales_query = self.db.query(func.sum(Sale.total_amount), func.count(Sale.id))\
                 .filter(
                     Sale.location_id == location_id,
+                    Sale.company_id == company_id,
                     func.date(Sale.sale_date) >= start_date,
                     func.date(Sale.sale_date) <= end_date
                 ).first()
@@ -216,27 +243,41 @@ class AdminRepository:
             total_sales = sales_query[0] or Decimal('0')
             total_transactions = sales_query[1] or 0
             
-            # ✅ CORREGIDO: Usar location_name en lugar de location_id
+            # Productos con filtro de company_id
             products_count = self.db.query(func.count(Product.id))\
-                .filter(Product.location_name == location.name, Product.is_active == 1).scalar() or 0
+                .filter(
+                    Product.location_name == location.name,
+                    Product.company_id == company_id,
+                    Product.is_active == 1
+                ).scalar() or 0
             
-            # Stock bajo usando location_name
+            # Stock bajo con filtro de company_id
             low_stock_count = self.db.query(func.count(ProductSize.id))\
                 .join(Product, Product.id == ProductSize.product_id)\
                 .filter(
                     Product.location_name == location.name,
+                    Product.company_id == company_id,
+                    ProductSize.company_id == company_id,
                     ProductSize.quantity < 5,
                     ProductSize.quantity > 0,
                     Product.is_active == 1
                 ).scalar() or 0
             
-            # Valor total del inventario
+            # Valor total del inventario con filtro
             inventory_value = self.db.query(func.sum(Product.unit_price * Product.total_quantity))\
-                .filter(Product.location_name == location.name, Product.is_active == 1).scalar() or Decimal('0')
+                .filter(
+                    Product.location_name == location.name,
+                    Product.company_id == company_id,
+                    Product.is_active == 1
+                ).scalar() or Decimal('0')
             
             # Usuarios activos en la ubicación
             active_users_count = self.db.query(func.count(User.id))\
-                .filter(User.location_id == location_id, User.is_active == True).scalar() or 0
+                .filter(
+                    User.location_id == location_id,
+                    User.company_id == company_id,
+                    User.is_active == True
+                ).scalar() or 0
             
             return {
                 "location_id": location.id,
@@ -273,14 +314,15 @@ class AdminRepository:
     
     # ==================== COSTOS OPERATIVOS ====================
     
-    def create_cost_configuration(self, cost_data: dict, admin_id: int) -> Dict[str, Any]:
-        """Crear configuración de costo"""
+    def create_cost_configuration(self, cost_data: dict, admin_id: int, company_id: int) -> Dict[str, Any]:
+        """Crear configuración de costo - MULTI-TENANT"""
         
         # En producción, esto se almacenaría en una tabla específica de costos
         # Por ahora, lo registramos como un expense especial
         expense_data = {
             "location_id": cost_data["location_id"],
             "user_id": admin_id,
+            "company_id": company_id,
             "concept": f"CONFIG_{cost_data['cost_type'].upper()}",
             "amount": cost_data["amount"],
             "receipt_image": None,
@@ -301,10 +343,13 @@ class AdminRepository:
             "frequency": cost_data["frequency"]
         }
     
-    def get_cost_configurations(self, location_id: int) -> List[Dict[str, Any]]:
-        """Obtener configuraciones de costo por ubicación - CORREGIDO"""
+    def get_cost_configurations(self, location_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """Obtener configuraciones de costo por ubicación - MULTI-TENANT"""
         
-        location = self.db.query(Location).filter(Location.id == location_id).first()
+        location = self.db.query(Location).filter(
+            Location.id == location_id,
+            Location.company_id == company_id
+        ).first()
         if not location:
             return []
         
@@ -313,6 +358,7 @@ class AdminRepository:
             .join(User, Expense.user_id == User.id)\
             .filter(
                 Expense.location_id == location_id,
+                Expense.company_id == company_id,
                 Expense.concept.like("CONFIG_%")
             )\
             .order_by(desc(Expense.expense_date))\
@@ -355,8 +401,8 @@ class AdminRepository:
     
     # ==================== VENTAS AL POR MAYOR ====================
     
-    def create_wholesale_sale(self, sale_data: dict, admin_id: int) -> Dict[str, Any]:
-        """Crear venta al por mayor"""
+    def create_wholesale_sale(self, sale_data: dict, admin_id: int, company_id: int) -> Dict[str, Any]:
+        """Crear venta al por mayor - MULTI-TENANT"""
         
         # Calcular totales
         items_total = sum(item["quantity"] * item["unit_price"] for item in sale_data["items"])
@@ -367,6 +413,7 @@ class AdminRepository:
         sale = Sale(
             seller_id=admin_id,
             location_id=sale_data["location_id"],
+            company_id=company_id,
             total_amount=final_amount,
             sale_date=datetime.now(),
             status="completed",
@@ -379,6 +426,7 @@ class AdminRepository:
         for item in sale_data["items"]:
             sale_item = SaleItem(
                 sale_id=sale.id,
+                company_id=company_id,
                 sneaker_reference_code=item["reference_code"],
                 brand=item.get("brand", "Unknown"),
                 model=item.get("model", "Unknown"),
@@ -395,7 +443,9 @@ class AdminRepository:
                 reference_code=item["reference_code"],
                 size=item["size"],
                 quantity=item["quantity"],
-                location_id=sale_data["location_id"]
+                location_id=sale_data["location_id"],
+                company_id=company_id,
+                user_id=admin_id
             )
         
         self.db.commit()
@@ -410,20 +460,22 @@ class AdminRepository:
             "sale_date": sale.sale_date
         }
     
-    def _update_inventory_for_sale(self, reference_code: str, size: str, quantity: int, location_id: int):
-        """Actualizar inventario después de venta"""
+    def _update_inventory_for_sale(self, reference_code: str, size: str, quantity: int, location_id: int, company_id: int, user_id: int):
+        """Actualizar inventario después de venta - MULTI-TENANT"""
         
         product = self.db.query(Product)\
             .filter(
                 Product.reference_code == reference_code,
-                Product.location_id == location_id
+                Product.location_id == location_id,
+                Product.company_id == company_id
             ).first()
         
         if product:
             product_size = self.db.query(ProductSize)\
                 .filter(
                     ProductSize.product_id == product.id,
-                    ProductSize.size == size
+                    ProductSize.size == size,
+                    ProductSize.company_id == company_id
                 ).first()
             
             if product_size and product_size.quantity >= quantity:
@@ -433,6 +485,8 @@ class AdminRepository:
                 # Registrar cambio de inventario
                 inventory_change = InventoryChange(
                     product_id=product.id,
+                    company_id=company_id,
+                    user_id=user_id,
                     change_type="wholesale_sale",
                     size=size,
                     quantity_before=old_quantity,
@@ -565,10 +619,13 @@ class AdminRepository:
     
     # ==================== APROBACIÓN DE DESCUENTOS ====================
     
-    def get_pending_discount_requests(self, admin_id: int) -> List[DiscountRequest]:
-        """Obtener solicitudes de descuento pendientes"""
+    def get_pending_discount_requests(self, admin_id: int, company_id: int) -> List[DiscountRequest]:
+        """Obtener solicitudes de descuento pendientes - MULTI-TENANT"""
         return self.db.query(DiscountRequest)\
-            .filter(DiscountRequest.status == "pending")\
+            .filter(
+                DiscountRequest.status == "pending",
+                DiscountRequest.company_id == company_id
+            )\
             .order_by(DiscountRequest.requested_at)\
             .all()
     
@@ -577,12 +634,16 @@ class AdminRepository:
         request_id: int, 
         approved: bool, 
         admin_id: int, 
-        admin_notes: Optional[str] = None
+        admin_notes: Optional[str] = None,
+        company_id: int = None
     ) -> Optional[DiscountRequest]:
-        """Aprobar o rechazar solicitud de descuento"""
+        """Aprobar o rechazar solicitud de descuento - MULTI-TENANT"""
         
         discount_request = self.db.query(DiscountRequest)\
-            .filter(DiscountRequest.id == request_id).first()
+            .filter(
+                DiscountRequest.id == request_id,
+                DiscountRequest.company_id == company_id
+            ).first()
         
         if not discount_request:
             return None
@@ -599,11 +660,12 @@ class AdminRepository:
     
     # ==================== SUPERVISIÓN DE TRANSFERENCIAS ====================
     
-    def get_transfers_overview(self, location_ids: List[int]) -> Dict[str, Any]:
-        """Obtener resumen de transferencias"""
+    def get_transfers_overview(self, location_ids: List[int], company_id: int) -> Dict[str, Any]:
+        """Obtener resumen de transferencias - MULTI-TENANT"""
         
         transfers = self.db.query(TransferRequest)\
             .filter(
+                TransferRequest.company_id == company_id,
                 or_(
                     TransferRequest.source_location_id.in_(location_ids),
                     TransferRequest.destination_location_id.in_(location_ids)
@@ -649,11 +711,15 @@ class AdminRepository:
         self, 
         user_id: int, 
         start_date: date, 
-        end_date: date
+        end_date: date,
+        company_id: int
     ) -> Dict[str, Any]:
-        """Obtener performance de un usuario específico"""
+        """Obtener performance de un usuario específico - MULTI-TENANT"""
         
-        user = self.db.query(User).filter(User.id == user_id).first()
+        user = self.db.query(User).filter(
+            User.id == user_id,
+            User.company_id == company_id
+        ).first()
         if not user:
             return {}
         
@@ -673,6 +739,7 @@ class AdminRepository:
             sales = self.db.query(Sale)\
                 .filter(
                     Sale.seller_id == user_id,
+                    Sale.company_id == company_id,
                     func.date(Sale.sale_date) >= start_date,
                     func.date(Sale.sale_date) <= end_date
                 ).all()
@@ -686,6 +753,8 @@ class AdminRepository:
                 .join(Sale, Sale.id == SaleItem.sale_id)\
                 .filter(
                     Sale.seller_id == user_id,
+                    Sale.company_id == company_id,
+                    SaleItem.company_id == company_id,
                     func.date(Sale.sale_date) >= start_date,
                     func.date(Sale.sale_date) <= end_date
                 ).scalar() or 0
@@ -694,6 +763,7 @@ class AdminRepository:
             discounts_requested = self.db.query(func.count(DiscountRequest.id))\
                 .filter(
                     DiscountRequest.requester_user_id == user_id,
+                    DiscountRequest.company_id == company_id,
                     func.date(DiscountRequest.requested_at) >= start_date,
                     func.date(DiscountRequest.requested_at) <= end_date
                 ).scalar() or 0
@@ -711,6 +781,7 @@ class AdminRepository:
             transfers_processed = self.db.query(func.count(TransferRequest.id))\
                 .filter(
                     TransferRequest.warehouse_keeper_id == user_id,
+                    TransferRequest.company_id == company_id,
                     func.date(TransferRequest.accepted_at) >= start_date,
                     func.date(TransferRequest.accepted_at) <= end_date
                 ).scalar() or 0
@@ -745,11 +816,14 @@ class AdminRepository:
     
     # ==================== DASHBOARD ADMINISTRATIVO ====================
     
-    def get_admin_dashboard_data(self, admin_id: int) -> Dict[str, Any]:
-        """Obtener datos completos del dashboard administrativo"""
+    def get_admin_dashboard_data(self, admin_id: int, company_id: int) -> Dict[str, Any]:
+        """Obtener datos completos del dashboard administrativo - MULTI-TENANT"""
         
-        admin_user = self.db.query(User).filter(User.id == admin_id).first()
-        managed_locations = self.get_managed_locations(admin_id)
+        admin_user = self.db.query(User).filter(
+            User.id == admin_id,
+            User.company_id == company_id
+        ).first()
+        managed_locations = self.get_managed_locations(admin_id, company_id)
         
         # Resumen diario
         today = date.today()
@@ -761,16 +835,22 @@ class AdminRepository:
         }
         
         for location in managed_locations:
-            location_stats = self.get_location_stats(location.id, today, today)
+            location_stats = self.get_location_stats(location.id, today, today, company_id)
             daily_summary["total_sales"] += Decimal(str(location_stats.get("daily_sales", 0)))
             daily_summary["active_users"] += location_stats.get("active_users", 0)
         
         # Tareas pendientes
         pending_tasks = {
             "discount_approvals": self.db.query(func.count(DiscountRequest.id))\
-                .filter(DiscountRequest.status == "pending").scalar() or 0,
+                .filter(
+                    DiscountRequest.status == "pending",
+                    DiscountRequest.company_id == company_id
+                ).scalar() or 0,
             "pending_transfers": self.db.query(func.count(TransferRequest.id))\
-                .filter(TransferRequest.status == "pending").scalar() or 0,
+                .filter(
+                    TransferRequest.status == "pending",
+                    TransferRequest.company_id == company_id
+                ).scalar() or 0,
             "low_stock_alerts": 0,  # Se calcularía con configuraciones de alerta
             "user_assignments": 0   # Se calcularía con asignaciones pendientes
         }
@@ -788,7 +868,7 @@ class AdminRepository:
         
         return {
             "admin_name": admin_user.full_name if admin_user else "Admin",
-            "managed_locations": [self.get_location_stats(loc.id, today, today) for loc in managed_locations],
+            "managed_locations": [self.get_location_stats(loc.id, today, today, company_id) for loc in managed_locations],
             "daily_summary": daily_summary,
             "pending_tasks": pending_tasks,
             "performance_overview": {
@@ -812,11 +892,12 @@ class CostRepository:
     
     # ==================== CONFIGURACIONES DE COSTO ====================
     
-    def create_cost_configuration(self, cost_data: dict, admin_id: int) -> Dict[str, Any]:
-        """Crear nueva configuración de costo"""
+    def create_cost_configuration(self, cost_data: dict, admin_id: int, company_id: int) -> Dict[str, Any]:
+        """Crear nueva configuración de costo - MULTI-TENANT"""
         
         cost_config = CostConfiguration(
             location_id=cost_data["location_id"],
+            company_id=company_id,
             cost_type=cost_data["cost_type"],
             amount=cost_data["amount"],
             frequency=cost_data["frequency"],
@@ -843,13 +924,16 @@ class CostRepository:
             "created_at": cost_config.created_at
         }
     
-    def get_cost_configuration_by_id(self, cost_id: int) -> Optional[Dict[str, Any]]:
-        """Obtener configuración por ID"""
+    def get_cost_configuration_by_id(self, cost_id: int, company_id: int) -> Optional[Dict[str, Any]]:
+        """Obtener configuración por ID - MULTI-TENANT"""
         
         config = self.db.query(CostConfiguration)\
             .join(Location, CostConfiguration.location_id == Location.id)\
             .join(User, CostConfiguration.created_by_user_id == User.id)\
-            .filter(CostConfiguration.id == cost_id)\
+            .filter(
+                CostConfiguration.id == cost_id,
+                CostConfiguration.company_id == company_id
+            )\
             .first()
         
         if not config:
@@ -872,13 +956,15 @@ class CostRepository:
             "updated_at": config.updated_at
         }
     
-    def get_active_cost_configurations(self, location_id: int) -> List[Dict[str, Any]]:
-        """Obtener configuraciones activas de una ubicación"""
+    def get_active_cost_configurations(self, location_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """Obtener configuraciones activas de una ubicación - MULTI-TENANT"""
         
         configs = self.db.query(CostConfiguration)\
             .join(Location, CostConfiguration.location_id == Location.id)\
             .filter(
                 CostConfiguration.location_id == location_id,
+                CostConfiguration.company_id == company_id,
+                Location.company_id == company_id,
                 CostConfiguration.is_active == True
             )\
             .order_by(CostConfiguration.cost_type, CostConfiguration.created_at)\
@@ -900,10 +986,13 @@ class CostRepository:
             for config in configs
         ]
     
-    def update_cost_configuration(self, cost_id: int, update_data: dict) -> Dict[str, Any]:
-        """Actualizar configuración existente"""
+    def update_cost_configuration(self, cost_id: int, update_data: dict, company_id: int) -> Dict[str, Any]:
+        """Actualizar configuración existente - MULTI-TENANT"""
         
-        config = self.db.query(CostConfiguration).filter(CostConfiguration.id == cost_id).first()
+        config = self.db.query(CostConfiguration).filter(
+            CostConfiguration.id == cost_id,
+            CostConfiguration.company_id == company_id
+        ).first()
         if not config:
             return {}
         
@@ -914,23 +1003,27 @@ class CostRepository:
         self.db.commit()
         self.db.refresh(config)
         
-        return self.get_cost_configuration_by_id(cost_id)
+        return self.get_cost_configuration_by_id(cost_id, company_id)
     
-    def delete_cost_configuration(self, cost_id: int):
-        """Eliminar configuración de costo"""
+    def delete_cost_configuration(self, cost_id: int, company_id: int):
+        """Eliminar configuración de costo - MULTI-TENANT"""
         
-        config = self.db.query(CostConfiguration).filter(CostConfiguration.id == cost_id).first()
+        config = self.db.query(CostConfiguration).filter(
+            CostConfiguration.id == cost_id,
+            CostConfiguration.company_id == company_id
+        ).first()
         if config:
             self.db.delete(config)
             self.db.commit()
     
     # ==================== PAGOS ====================
     
-    def create_payment_record(self, payment_data: dict) -> Dict[str, Any]:
-        """Registrar pago realizado"""
+    def create_payment_record(self, payment_data: dict, company_id: int) -> Dict[str, Any]:
+        """Registrar pago realizado - MULTI-TENANT"""
         
         payment = CostPayment(
             cost_configuration_id=payment_data["cost_configuration_id"],
+            company_id=company_id,
             due_date=payment_data["due_date"],
             payment_date=payment_data["payment_date"],
             amount=payment_data["payment_amount"],
@@ -960,13 +1053,15 @@ class CostRepository:
         self, 
         cost_config_id: int, 
         from_date: date, 
-        to_date: date
+        to_date: date,
+        company_id: int
     ) -> List[Dict[str, Any]]:
-        """Obtener pagos realizados en un rango de fechas"""
+        """Obtener pagos realizados en un rango de fechas - MULTI-TENANT"""
         
         payments = self.db.query(CostPayment)\
             .filter(
                 CostPayment.cost_configuration_id == cost_config_id,
+                CostPayment.company_id == company_id,
                 CostPayment.due_date >= from_date,
                 CostPayment.due_date <= to_date
             )\
@@ -985,12 +1080,16 @@ class CostRepository:
             for payment in payments
         ]
     
-    def get_all_paid_payments_for_config(self, cost_config_id: int) -> List[Dict[str, Any]]:
-        """Obtener todos los pagos realizados de una configuración"""
+    def get_all_paid_payments_for_config(self, cost_config_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """Obtener todos los pagos realizados de una configuración - MULTI-TENANT"""
         
         payments = self.db.query(CostPayment)\
             .join(User, CostPayment.paid_by_user_id == User.id)\
-            .filter(CostPayment.cost_configuration_id == cost_config_id)\
+            .filter(
+                CostPayment.cost_configuration_id == cost_config_id,
+                CostPayment.company_id == company_id,
+                User.company_id == company_id
+            )\
             .order_by(desc(CostPayment.payment_date))\
             .all()
         
@@ -1008,13 +1107,15 @@ class CostRepository:
             for payment in payments
         ]
     
-    def get_paid_amount_for_month(self, location_id: int, month_start: date, month_end: date) -> Decimal:
-        """Obtener monto total pagado en un mes"""
+    def get_paid_amount_for_month(self, location_id: int, month_start: date, month_end: date, company_id: int) -> Decimal:
+        """Obtener monto total pagado en un mes - MULTI-TENANT"""
         
         result = self.db.query(func.sum(CostPayment.amount))\
             .join(CostConfiguration, CostPayment.cost_configuration_id == CostConfiguration.id)\
             .filter(
                 CostConfiguration.location_id == location_id,
+                CostConfiguration.company_id == company_id,
+                CostPayment.company_id == company_id,
                 CostPayment.payment_date >= month_start,
                 CostPayment.payment_date <= month_end
             )\
@@ -1022,11 +1123,14 @@ class CostRepository:
         
         return result or Decimal('0')
     
-    def delete_paid_payments_for_config(self, cost_config_id: int):
-        """Eliminar todos los pagos de una configuración"""
+    def delete_paid_payments_for_config(self, cost_config_id: int, company_id: int):
+        """Eliminar todos los pagos de una configuración - MULTI-TENANT"""
         
         self.db.query(CostPayment)\
-            .filter(CostPayment.cost_configuration_id == cost_config_id)\
+            .filter(
+                CostPayment.cost_configuration_id == cost_config_id,
+                CostPayment.company_id == company_id
+            )\
             .delete()
         self.db.commit()
     
@@ -1036,13 +1140,15 @@ class CostRepository:
         self, 
         cost_config_id: int, 
         from_date: date, 
-        to_date: date
+        to_date: date,
+        company_id: int
     ) -> List[Dict[str, Any]]:
-        """Obtener excepciones en un rango de fechas"""
+        """Obtener excepciones en un rango de fechas - MULTI-TENANT"""
         
         exceptions = self.db.query(CostPaymentException)\
             .filter(
                 CostPaymentException.cost_configuration_id == cost_config_id,
+                CostPaymentException.company_id == company_id,
                 CostPaymentException.exception_date >= from_date,
                 CostPaymentException.exception_date <= to_date
             )\
@@ -1061,11 +1167,14 @@ class CostRepository:
             for exc in exceptions
         ]
     
-    def get_all_payment_exceptions_for_config(self, cost_config_id: int) -> List[Dict[str, Any]]:
-        """Obtener todas las excepciones de una configuración"""
+    def get_all_payment_exceptions_for_config(self, cost_config_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """Obtener todas las excepciones de una configuración - MULTI-TENANT"""
         
         exceptions = self.db.query(CostPaymentException)\
-            .filter(CostPaymentException.cost_configuration_id == cost_config_id)\
+            .filter(
+                CostPaymentException.cost_configuration_id == cost_config_id,
+                CostPaymentException.company_id == company_id
+            )\
             .order_by(CostPaymentException.exception_date)\
             .all()
         
@@ -1082,21 +1191,25 @@ class CostRepository:
             for exc in exceptions
         ]
     
-    def delete_payment_exceptions_for_config(self, cost_config_id: int):
-        """Eliminar todas las excepciones de una configuración"""
+    def delete_payment_exceptions_for_config(self, cost_config_id: int, company_id: int):
+        """Eliminar todas las excepciones de una configuración - MULTI-TENANT"""
         
         self.db.query(CostPaymentException)\
-            .filter(CostPaymentException.cost_configuration_id == cost_config_id)\
+            .filter(
+                CostPaymentException.cost_configuration_id == cost_config_id,
+                CostPaymentException.company_id == company_id
+            )\
             .delete()
         self.db.commit()
     
     # ==================== ARCHIVO Y AUDITORÍA ====================
     
-    def create_deletion_archive_record(self, archive_data: dict) -> int:
-        """Crear registro de archivo antes de eliminación"""
+    def create_deletion_archive_record(self, archive_data: dict, company_id: int) -> int:
+        """Crear registro de archivo antes de eliminación - MULTI-TENANT"""
         
         archive = CostDeletionArchive(
             original_cost_id=archive_data["original_cost_id"],
+            company_id=company_id,
             configuration_data=json.dumps(archive_data["configuration_data"], default=str),
             paid_payments_data=json.dumps(archive_data["paid_payments_data"], default=str),
             exceptions_data=json.dumps(archive_data["exceptions_data"], default=str),
@@ -1112,8 +1225,8 @@ class CostRepository:
     
     # ==================== MÉTODOS DE CONSULTA AVANZADA ====================
     
-    def get_managed_locations_for_admin(self, admin_id: int) -> List[Dict[str, Any]]:
-        """Obtener ubicaciones gestionadas por un administrador"""
+    def get_managed_locations_for_admin(self, admin_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """Obtener ubicaciones gestionadas por un administrador - MULTI-TENANT"""
         
         # Usar el modelo AdminLocationAssignment en lugar de text()
         locations = self.db.query(Location)\
@@ -1121,7 +1234,9 @@ class CostRepository:
             .filter(
                 AdminLocationAssignment.admin_id == admin_id,
                 AdminLocationAssignment.is_active == True,
-                Location.is_active == True
+                AdminLocationAssignment.company_id == company_id,
+                Location.is_active == True,
+                Location.company_id == company_id
             )\
             .all()
         
@@ -1135,8 +1250,8 @@ class CostRepository:
             for loc in locations
         ]   
     
-    def get_cost_configurations_by_admin(self, admin_id: int) -> List[Dict[str, Any]]:
-        """Obtener todas las configuraciones de un administrador"""
+    def get_cost_configurations_by_admin(self, admin_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """Obtener todas las configuraciones de un administrador - MULTI-TENANT"""
         
         configs = self.db.query(CostConfiguration)\
             .join(Location, CostConfiguration.location_id == Location.id)\
@@ -1144,7 +1259,10 @@ class CostRepository:
             .filter(
                 AdminLocationAssignment.admin_id == admin_id,
                 AdminLocationAssignment.is_active == True,
-                CostConfiguration.is_active == True
+                AdminLocationAssignment.company_id == company_id,
+                CostConfiguration.is_active == True,
+                CostConfiguration.company_id == company_id,
+                Location.company_id == company_id
             )\
             .order_by(Location.name, CostConfiguration.cost_type)\
             .all()

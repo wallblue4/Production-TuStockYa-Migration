@@ -7,19 +7,22 @@ from sqlalchemy import func
 
 from app.config.settings import settings
 from app.config.database import get_db
-from app.core.auth.dependencies import get_current_user, require_roles
+from app.core.auth.dependencies import get_current_user, require_roles, get_current_company_id
 from app.shared.database.models import (
     User, 
     Location, 
     DiscountRequest, 
     TransferRequest,
     Sale,
-    Product
+    Product,
+    AdminLocationAssignment
 )
 from .service import AdminService
 from .schemas import *
 import logging
-import json 
+import json
+import os
+from pydantic import ValidationError 
 from .cost_router import router as cost_router
 
 # Configuración básica del logger
@@ -37,6 +40,7 @@ router.include_router(cost_router)
 async def create_user(
     user_data: UserCreate,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -55,7 +59,7 @@ async def create_user(
     - Bodegueros solo en bodegas (type='bodega')
     - Corredores pueden no tener ubicación específica
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.create_user(user_data, current_user)
 
 @router.get("/users", response_model=List[UserResponse])
@@ -64,6 +68,7 @@ async def get_managed_users(
     location_id: Optional[int] = Query(None, description="Filtrar por ubicación"),
     is_active: Optional[bool] = Query(None, description="Filtrar por estado activo"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -74,10 +79,10 @@ async def get_managed_users(
     - BOSS ve todos los usuarios
     - Filtros aplicados después de la validación de permisos
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     
     # ====== USAR MÉTODO CORREGIDO QUE RESPETA ASIGNACIONES ======
-    users = service.repository.get_users_by_admin(current_user.id)
+    users = service.repository.get_users_by_admin(current_user.id, current_company_id)
     
     # ====== VALIDACIÓN ADICIONAL DE FILTRO POR UBICACIÓN ======
     if location_id and current_user.role != "boss":
@@ -116,6 +121,7 @@ async def get_managed_users(
 async def get_available_locations_for_user_creation(
     role: Optional[UserRole] = Query(None, description="Filtrar por rol de usuario a crear"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -126,10 +132,10 @@ async def get_available_locations_for_user_creation(
     - BOSS ve todas las ubicaciones
     - Filtro por tipo según el rol del usuario a crear
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     
     # Obtener ubicaciones gestionadas
-    managed_locations = service.repository.get_managed_locations(current_user.id)
+    managed_locations = service.repository.get_managed_locations(current_user.id, current_company_id)
     
     # Filtrar por tipo según rol
     if role:
@@ -159,6 +165,7 @@ async def update_user(
     user_id: int,
     update_data: UserUpdate,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -176,7 +183,7 @@ async def update_user(
     - Mover bodeguero entre bodegas gestionadas
     - Activar/desactivar usuario
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     
     return await service.update_user(user_id, update_data, current_user)
 
@@ -186,6 +193,7 @@ async def update_user(
 async def assign_user_to_location(
     assignment: UserAssignment,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -215,7 +223,7 @@ async def assign_user_to_location(
     - Admin intenta asignar a ubicación no controlada
     - Intentar asignar vendedor a bodega o bodeguero a local
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.assign_user_to_location(assignment, current_user)
 
 # ==================== AD001 & AD002: GESTIÓN DE UBICACIONES ====================
@@ -224,6 +232,7 @@ async def assign_user_to_location(
 async def get_managed_locations(
     location_type: Optional[LocationType] = Query(None, description="Filtrar por tipo"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -236,7 +245,7 @@ async def get_managed_locations(
     - Filtrar por tipo (local/bodega)
     - Estado operativo de cada ubicación
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     locations = await service.get_managed_locations(current_user)
     
     if location_type:
@@ -250,6 +259,7 @@ async def get_location_statistics(
     start_date: date = Query(..., description="Fecha inicio para estadísticas"),
     end_date: date = Query(..., description="Fecha fin para estadísticas"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -275,7 +285,7 @@ async def get_location_statistics(
     - Reportes de inventario por ubicación
     - Métricas de ventas detalladas
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.get_location_statistics(location_id, start_date, end_date, current_user)
 
 # ==================== AD007 & AD008: CONFIGURAR COSTOS ====================
@@ -285,6 +295,7 @@ async def get_cost_configurations(
     location_id: Optional[int] = Query(None, description="Filtrar por ubicación"),
     cost_type: Optional[CostType] = Query(None, description="Filtrar por tipo de costo"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -307,7 +318,7 @@ async def get_cost_configurations(
     - Auditoría de configuraciones de costos
     - Planificación presupuestaria
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     
     cost_type_value = cost_type.value if cost_type else None
     
@@ -317,42 +328,13 @@ async def get_cost_configurations(
         cost_type=cost_type_value
     )
 
-@router.get("/costs", response_model=List[CostResponse])
-async def get_cost_configurations(
-    location_id: Optional[int] = Query(None, description="Filtrar por ubicación"),
-    cost_type: Optional[CostType] = Query(None, description="Filtrar por tipo de costo"),
-    current_user: User = Depends(require_roles(["administrador", "boss"])),
-    db: Session = Depends(get_db)
-):
-    """
-    Obtener configuraciones de costos
-    """
-    service = AdminService(db)
-    
-    if location_id:
-        costs = service.repository.get_cost_configurations(location_id)
-        if cost_type:
-            costs = [c for c in costs if c["cost_type"] == cost_type.value]
-        return costs
-    
-    # Si no se especifica ubicación, obtener de todas las ubicaciones gestionadas
-    managed_locations = service.repository.get_managed_locations(current_user.id)
-    all_costs = []
-    
-    for location in managed_locations:
-        location_costs = service.repository.get_cost_configurations(location.id)
-        if cost_type:
-            location_costs = [c for c in location_costs if c["cost_type"] == cost_type.value]
-        all_costs.extend(location_costs)
-    
-    return all_costs
-
 # ==================== AD009: VENTAS AL POR MAYOR ====================
 
 @router.post("/wholesale-sales", response_model=WholesaleSaleResponse)
 async def process_wholesale_sale(
     sale_data: WholesaleSaleCreate,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -372,7 +354,7 @@ async def process_wholesale_sale(
     4. Actualizar inventario de cada producto
     5. Generar comprobante de venta mayorista
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.process_wholesale_sale(sale_data, current_user)
 
 # ==================== AD010: REPORTES DE VENTAS ====================
@@ -381,6 +363,7 @@ async def process_wholesale_sale(
 async def generate_sales_reports(
     filters: ReportFilter,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -400,7 +383,7 @@ async def generate_sales_reports(
     - Identificar productos más exitosos
     - Comparar performance entre ubicaciones
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.generate_sales_report(filters, current_user)
 
 # ==================== AD011: ALERTAS DE INVENTARIO ====================
@@ -409,6 +392,7 @@ async def generate_sales_reports(
 async def configure_inventory_alert(
     alert_config: InventoryAlert,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -431,7 +415,7 @@ async def configure_inventory_alert(
     3. Email a lista de destinatarios configurada
     4. Alerta se registra para seguimiento
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.configure_inventory_alert(alert_config, current_user)
 
 # ==================== AD012: APROBAR DESCUENTOS ====================
@@ -439,6 +423,7 @@ async def configure_inventory_alert(
 @router.get("/discount-requests/pending", response_model=List[DiscountRequestResponse])
 async def get_pending_discount_requests(
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -456,13 +441,14 @@ async def get_pending_discount_requests(
     - Monto y razón del descuento solicitado
     - Fecha de solicitud para priorizar
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.get_pending_discount_requests(current_user)
 
 @router.post("/discount-requests/approve", response_model=DiscountRequestResponse)
 async def approve_discount_request(
     approval: DiscountApproval,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -482,7 +468,7 @@ async def approve_discount_request(
     5. Sistema notifica al vendedor
     6. Si se aprueba, descuento se aplica automáticamente
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.approve_discount_request(approval, current_user)
 
 # ==================== AD013: SUPERVISAR TRASLADOS ====================
@@ -490,6 +476,7 @@ async def approve_discount_request(
 @router.get("/transfers/overview")
 async def get_transfers_overview(
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -508,7 +495,7 @@ async def get_transfers_overview(
     - Performance por bodeguero y corredor
     - Alertas de transferencias demoradas
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.get_transfers_overview(current_user)
 
 # ==================== AD014: SUPERVISAR PERFORMANCE ====================
@@ -520,6 +507,7 @@ async def get_users_performance(
     user_ids: Optional[List[int]] = Query(None, description="IDs de usuarios específicos"),
     role: Optional[UserRole] = Query(None, description="Filtrar por rol"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -554,7 +542,7 @@ async def get_users_performance(
     - Incidencias reportadas
     - Tasa de puntualidad
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.get_users_performance(current_user, start_date, end_date, user_ids)
 
 # ==================== AD015: ASIGNACIÓN DE MODELOS ====================
@@ -563,6 +551,7 @@ async def get_users_performance(
 async def assign_product_model_to_warehouses(
     assignment: ProductModelAssignment,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -586,7 +575,7 @@ async def assign_product_model_to_warehouses(
     - Límites de stock por ubicación
     - Redistribución automática cuando sea necesario
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.assign_product_model_to_warehouses(assignment, current_user)
 
 @router.get("/product-assignments")
@@ -594,6 +583,7 @@ async def get_product_assignments(
     product_reference: Optional[str] = Query(None, description="Código de referencia"),
     warehouse_id: Optional[int] = Query(None, description="ID de bodega"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -608,6 +598,7 @@ async def get_product_assignments(
 @router.get("/dashboard", response_model=AdminDashboard)
 async def get_admin_dashboard(
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -627,19 +618,20 @@ async def get_admin_dashboard(
     - **Performance overview:** Métricas consolidadas del equipo
     - **Actividades recientes:** Log de acciones importantes
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.get_admin_dashboard(current_user)
 
 @router.get("/dashboard/metrics", response_model=DashboardMetrics)
 async def get_dashboard_metrics(
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
     Métricas específicas del dashboard
     """
-    service = AdminService(db)
-    dashboard_data = service.repository.get_admin_dashboard_data(current_user.id)
+    service = AdminService(db, current_company_id)
+    dashboard_data = service.repository.get_admin_dashboard_data(current_user.id, current_company_id)
     
     return DashboardMetrics(
         total_sales_today=Decimal(str(dashboard_data["daily_summary"]["total_sales"])),
@@ -684,16 +676,17 @@ async def admin_module_health():
 @router.get("/statistics")
 async def get_admin_statistics(
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
     Estadísticas generales del módulo administrativo
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     
     # Estadísticas básicas
-    managed_locations = service.repository.get_managed_locations(current_user.id)
-    managed_users = service.repository.get_users_by_admin(current_user.id)
+    managed_locations = service.repository.get_managed_locations(current_user.id, current_company_id)
+    managed_users = service.repository.get_users_by_admin(current_user.id, current_company_id)
     
     stats = {
         "managed_locations": len(managed_locations),
@@ -722,6 +715,7 @@ async def get_admin_statistics(
 @router.post("/system/init-additional-tables")
 async def initialize_additional_tables(
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -749,12 +743,13 @@ async def initialize_additional_tables(
 @router.get("/system/overview")
 async def get_system_overview(
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
     Vista general del sistema para administradores
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     
     # Datos consolidados del sistema
     total_users = db.query(func.count(User.id)).scalar()
@@ -795,7 +790,8 @@ async def get_system_overview(
 
 @router.get("/test-microservice-basic")
 async def test_microservice_basic(
-    current_user: User = Depends(require_roles(["administrador", "boss"]))
+    current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id)
 ):
     """Test básico de conectividad"""
     import httpx
@@ -858,6 +854,7 @@ async def process_video_inventory_entry(
     reference_image: Optional[UploadFile] = File(None, description="Imagen de referencia del producto"),
     video_file: UploadFile = File(..., description="Video del producto para IA"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
 
@@ -908,7 +905,7 @@ async def process_video_inventory_entry(
     - Resolución recomendada: 800x600px
     - Buena calidad y iluminación
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     import logging
     logger = logging.getLogger(__name__)
 
@@ -968,6 +965,7 @@ async def get_video_processing_history(
     date_from: Optional[datetime] = Query(None, description="Fecha desde"),
     date_to: Optional[datetime] = Query(None, description="Fecha hasta"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -980,7 +978,7 @@ async def get_video_processing_history(
     - Ver resultados de extracción de IA
     - Seguimiento del entrenamiento del modelo
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.get_video_processing_history(
         limit=limit,
         status=status,
@@ -994,12 +992,13 @@ async def get_video_processing_history(
 async def get_video_processing_details(
     video_id: int,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
     Obtener detalles específicos de un video procesado
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.get_video_processing_details(video_id, current_user)
 
 # app/modules/admin/router.py - AGREGAR estos endpoints
@@ -1009,6 +1008,7 @@ async def video_processing_complete_webhook(
     job_id: int = Form(...),
     status: str = Form(...),
     results: str = Form(...),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -1037,7 +1037,7 @@ async def video_processing_complete_webhook(
             job.detected_products = json.dumps(results_data.get("detected_products", []))
             
             # Crear productos reales en BD
-            service = AdminService(db)
+            service = AdminService(db, current_company_id)
             created_products = await service._create_products_from_ai_results(
                 results_data, job
             )
@@ -1067,10 +1067,11 @@ async def video_processing_complete_webhook(
 async def get_video_job_status(
     job_id: int,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """Consultar estado de job de video"""
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.get_video_processing_status(job_id, current_user)
 
 
@@ -1080,6 +1081,7 @@ async def get_video_job_status(
 async def assign_admin_to_location(
     assignment: AdminLocationAssignmentCreate,
     current_user: User = Depends(require_roles(["boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -1096,13 +1098,14 @@ async def assign_admin_to_location(
     - Redistribución de responsabilidades
     - Expansión a nuevas ubicaciones
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.assign_admin_to_locations(assignment, current_user)
 
 @router.post("/admin-assignments/bulk", response_model=List[AdminLocationAssignmentResponse])
 async def assign_admin_to_multiple_locations(
     bulk_assignment: AdminLocationAssignmentBulk,
     current_user: User = Depends(require_roles(["boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -1113,13 +1116,14 @@ async def assign_admin_to_multiple_locations(
     - Proceso atómico por ubicación (si una falla, continúa con las demás)
     - Notas aplicadas a todas las asignaciones
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.assign_admin_to_multiple_locations(bulk_assignment, current_user)
 
 @router.get("/admin-assignments", response_model=List[AdminLocationAssignmentResponse])
 async def get_admin_assignments(
     admin_id: Optional[int] = Query(None, description="ID del administrador (solo para BOSS)"),
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -1128,7 +1132,7 @@ async def get_admin_assignments(
     **Para administradores:** Ve solo sus propias asignaciones
     **Para BOSS:** Puede ver asignaciones de cualquier administrador
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     
     if current_user.role == "boss":
         if admin_id:
@@ -1149,6 +1153,7 @@ async def remove_admin_assignment(
     admin_id: int,
     location_id: int,
     current_user: User = Depends(require_roles(["boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -1159,12 +1164,13 @@ async def remove_admin_assignment(
     - Desactiva la asignación (no la elimina para mantener historial)
     - Los usuarios bajo gestión del administrador quedan sin supervisión directa
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     return await service.remove_admin_assignment(admin_id, location_id, current_user)
 
 @router.get("/my-locations", response_model=List[LocationResponse])
 async def get_my_assigned_locations(
     current_user: User = Depends(require_roles(["administrador"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -1175,7 +1181,7 @@ async def get_my_assigned_locations(
     - Incluye estadísticas básicas de cada ubicación
     - Base para otros endpoints que requieren validación de permisos
     """
-    service = AdminService(db)
+    service = AdminService(db, current_company_id)
     
     # Usar el método corregido que ya filtra por asignaciones
     locations = await service.get_managed_locations(current_user)
@@ -1188,6 +1194,7 @@ async def get_my_assigned_locations(
 async def can_manage_location(
     location_id: int,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -1213,6 +1220,7 @@ async def can_manage_location(
 @router.get("/available-admins", response_model=List[UserResponse])
 async def get_available_administrators(
     current_user: User = Depends(require_roles(["boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -1245,6 +1253,7 @@ async def get_available_administrators(
 @router.get("/unassigned-locations", response_model=List[LocationResponse])
 async def get_unassigned_locations(
     current_user: User = Depends(require_roles(["boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -1343,6 +1352,7 @@ async def video_processing_callback(
 @router.get("/diagnosis/microservice-connection")
 async def test_microservice_connection(
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -1418,6 +1428,7 @@ async def test_microservice_connection(
 async def get_job_logs(
     job_id: int,
     current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """

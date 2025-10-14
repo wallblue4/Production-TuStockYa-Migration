@@ -491,3 +491,91 @@ class FirstSuperadminCreate(BaseModel):
                 "secret_key": "INSTALL_SECRET_KEY_2025"
             }
         }
+
+
+class BossCreate(BaseModel):
+    """Schema para crear el usuario Boss de una empresa"""
+    email: str
+    password: str = Field(..., min_length=8, max_length=100)
+    first_name: str = Field(..., min_length=2, max_length=255)
+    last_name: str = Field(..., min_length=2, max_length=255)
+    
+    @field_validator('password')
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        """Validar fortaleza de contraseña"""
+        if len(v) < 8:
+            raise ValueError('La contraseña debe tener al menos 8 caracteres')
+        if not any(c.isupper() for c in v):
+            raise ValueError('La contraseña debe contener al menos una mayúscula')
+        if not any(c.islower() for c in v):
+            raise ValueError('La contraseña debe contener al menos una minúscula')
+        if not any(c.isdigit() for c in v):
+            raise ValueError('La contraseña debe contener al menos un número')
+        return v
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "email": "boss@zapateriaabc.com",
+                "password": "BossSecure123!",
+                "first_name": "Juan",
+                "last_name": "Pérez",
+                "phone": "+57 300 123 4567"
+            }
+        }
+
+
+class BossResponse(BaseModel):
+    """Schema de respuesta para usuario Boss creado"""
+    id: int
+    email: str
+    first_name: str
+    last_name: str
+    full_name: str
+    role: str
+    company_id: int
+    company_name: str
+    is_active: bool
+    created_at: datetime
+    created_by_superadmin_id: Optional[int]
+    
+    class Config:
+        from_attributes = True
+        json_schema_extra = {
+            "example": {
+                "id": 5,
+                "email": "boss@zapateriaabc.com",
+                "first_name": "Juan",
+                "last_name": "Pérez",
+                "full_name": "Juan Pérez",
+                "role": "boss",
+                "company_id": 1,
+                "company_name": "Zapatería ABC",
+                "is_active": True,
+                "created_at": "2025-10-13T10:30:00"
+            }
+        }
+
+
+class CompanyWithBossResponse(BaseModel):
+    """Schema de respuesta con empresa y su Boss"""
+    company: CompanyResponse
+    boss: Optional[BossResponse]
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "company": {
+                    "id": 1,
+                    "name": "Zapatería ABC",
+                    "subdomain": "zapateriaabc"
+                },
+                "boss": {
+                    "id": 5,
+                    "email": "boss@zapateriaabc.com",
+                    "full_name": "Juan Pérez",
+                    "role": "boss"
+                }
+            }
+        }

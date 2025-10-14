@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
-from app.core.auth.dependencies import require_roles
+from app.core.auth.dependencies import require_roles ,get_current_company_id
 from .service import DiscountsService
 from .schemas import DiscountRequestCreate, DiscountRequestResponse, MyDiscountRequestsResponse
 
@@ -13,6 +13,7 @@ router = APIRouter()
 async def create_discount_request(
     discount_data: DiscountRequestCreate,
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -37,12 +38,14 @@ async def create_discount_request(
     service = DiscountsService(db)
     return await service.create_discount_request(
         discount_data=discount_data,
-        seller_id=current_user.id
+        seller_id=current_user.id,
+        company_id=company_id
     )
 
 @router.get("/my-requests", response_model=MyDiscountRequestsResponse)
 async def get_my_discount_requests(
     current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -56,7 +59,7 @@ async def get_my_discount_requests(
     - Estadísticas de aprobación
     """
     service = DiscountsService(db)
-    return await service.get_my_discount_requests(seller_id=current_user.id)
+    return await service.get_my_discount_requests(seller_id=current_user.id, company_id=company_id)
 
 @router.get("/health")
 async def discounts_health():

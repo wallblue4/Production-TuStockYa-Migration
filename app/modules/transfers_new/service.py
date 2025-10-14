@@ -63,12 +63,14 @@ class TransfersService:
             logger.info(f"✅ Ubicación origen: '{source_location.name}'")
             logger.info(f"✅ Ubicación destino: '{destination_location.name}'")
             
-            # ✅ VALIDAR STOCK CON NOMBRE REAL
+            # ✅ VALIDAR STOCK CON NOMBRE REAL + MULTI-TENANT
             product_size = self.db.query(ProductSize).join(Product).filter(
                 and_(
                     Product.reference_code == transfer_data.sneaker_reference_code,
                     ProductSize.size == transfer_data.size,
-                    ProductSize.location_name == source_location.name  # ✅ NOMBRE REAL
+                    ProductSize.location_name == source_location.name,  # ✅ NOMBRE REAL
+                    Product.company_id == company_id,  # ✅ MULTI-TENANT
+                    ProductSize.company_id == company_id  # ✅ MULTI-TENANT
                 )
             ).first()
             
@@ -340,7 +342,8 @@ class TransfersService:
                 returned_to_location=source_location.name if source_location else "Bodega",
                 notes=return_data.notes or f"Devolución por: {return_data.reason}",
                 read_by_requester=True,
-                created_at=datetime.now()
+                created_at=datetime.now(),
+                company_id=company_id
             )
             self.db.add(notification)
             

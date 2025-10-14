@@ -14,6 +14,10 @@ from .schemas import (
     DailySalesResponse, PendingSalesResponse
 )
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 @router.post("/create", response_model=SaleResponse)

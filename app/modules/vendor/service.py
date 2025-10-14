@@ -3,6 +3,7 @@ from typing import Dict, Any
 from datetime import datetime
 from sqlalchemy.orm import Session
 import logging
+from fastapi import HTTPException
 
 from .repository import VendorRepository
 from .schemas import VendorDashboardResponse, TransferSummaryResponse, CompletedTransfersResponse
@@ -10,20 +11,21 @@ from .schemas import VendorDashboardResponse, TransferSummaryResponse, Completed
 logger = logging.getLogger(__name__)
 
 class VendorService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, company_id: int):
         self.db = db
+        self.company_id = company_id
         self.repository = VendorRepository(db)
     
     async def get_dashboard(self, user_id: int, user_info: Dict[str, Any]) -> VendorDashboardResponse:
         """Dashboard completo del vendedor - igual estructura que backend antiguo"""
         
         # Obtener todos los datos necesarios
-        sales_today = self.repository.get_sales_summary_today(user_id)
-        payment_methods = self.repository.get_payment_methods_breakdown_today(user_id)
-        expenses_today = self.repository.get_expenses_summary_today(user_id)
-        transfer_stats = self.repository.get_transfer_requests_stats(user_id)
-        discount_stats = self.repository.get_discount_requests_stats(user_id)
-        unread_returns = self.repository.get_unread_return_notifications(user_id)
+        sales_today = self.repository.get_sales_summary_today(user_id, self.company_id)
+        payment_methods = self.repository.get_payment_methods_breakdown_today(user_id, self.company_id)
+        expenses_today = self.repository.get_expenses_summary_today(user_id, self.company_id)
+        transfer_stats = self.repository.get_transfer_requests_stats(user_id, self.company_id)
+        discount_stats = self.repository.get_discount_requests_stats(user_id, self.company_id)
+        unread_returns = self.repository.get_unread_return_notifications(user_id, self.company_id)
         
         # Calcular ingreso neto
         net_income = sales_today['confirmed_amount'] - expenses_today['total']
@@ -82,7 +84,7 @@ class VendorService:
     
     async def get_pending_transfers(self, user_id: int) -> TransferSummaryResponse:
         """Obtener transferencias pendientes para el vendedor"""
-        pending_transfers = self.repository.get_pending_transfers_for_vendor(user_id)
+        pending_transfers = self.repository.get_pending_transfers_for_vendor(user_id, self.company_id)
         
         # Contar por urgencia
         urgent_count = len([t for t in pending_transfers if t['priority'] == 'high'])
@@ -109,7 +111,7 @@ class VendorService:
     
     async def get_completed_transfers(self, user_id: int) -> CompletedTransfersResponse:
         """Obtener transferencias completadas del día"""
-        completed_transfers = self.repository.get_completed_transfers_today(user_id)
+        completed_transfers = self.repository.get_completed_transfers_today(user_id, self.company_id)
         
         # Calcular estadísticas del día
         total_transfers = len(completed_transfers)
@@ -136,7 +138,7 @@ class VendorService:
         """
         Obtener asignaciones de pickup para el vendedor (self-pickup)
         """
-        assignments = self.repository.get_vendor_pickup_assignments(vendor_id)
+        assignments = self.repository.get_vendor_pickup_assignments(vendor_id, self.company_id)
         
         # Calcular estadísticas
         ready_to_pickup = len([a for a in assignments if a['status'] == 'accepted'])
@@ -170,7 +172,8 @@ class VendorService:
             result = self.repository.deliver_return_to_warehouse(
                 return_id,
                 delivery_notes,
-                vendor_id
+                vendor_id,
+                self.company_id
             )
             
             return result
