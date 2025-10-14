@@ -10,7 +10,7 @@ from app.modules.transfers_new.router import router as transfers_router
 from app.modules.warehouse_new.router import router as warehouse_router 
 from app.modules.courier.router import router as courier_router
 from app.modules.inventory.router import router as inventory_router
-from app.modules.superadmin.router import router as superadmin_router
+from app.modules.mayoreo.router import router as mayoreo_router
 
 
 from app.modules.admin import admin_router
@@ -90,9 +90,9 @@ api_router.include_router(
 )
 
 api_router.include_router(
-    superadmin_router,
-    prefix="/superadmin",
-    tags=["Superadmin Management"]
+    mayoreo_router,
+    prefix="/mayoreo",
+    tags=["Mayoreo Management"]
 )
 
 # ==================== ENDPOINTS RAÍZ ACTUALIZADOS ====================
@@ -110,6 +110,7 @@ async def api_root():
             "sales": "/api/v1/vendor/sales ✅ IMPLEMENTADO",
             "transfers": "/api/v1/transfers ✅ IMPLEMENTADO", # ✅ ACTUALIZADO
             "inventory": "/api/v1/inventory ✅ IMPLEMENTADO", # ✅ NUEVO
+            "mayoreo": "/api/v1/mayoreo ✅ IMPLEMENTADO", # ✅ NUEVO
             "warehouse": "/api/v1/warehouse (próximamente)",
             "logistics": "/api/v1/logistics (próximamente)"
         },
@@ -118,6 +119,7 @@ async def api_root():
             "sales": "✅ Active - 16 endpoints del vendedor",
             "transfers": "✅ Active - Funcionalidades de transferencias", # ✅ NUEVO
             "inventory": "✅ Active - Consulta de inventario por rol", # ✅ NUEVO
+            "mayoreo": "✅ Active - CRUD mayoreo y ventas (Solo admin)", # ✅ NUEVO
             "warehouse": "⏳ Pending - Funcionalidades bodeguero",
             "courier": "⏳ Pending - Funcionalidades corredor",
             "admin": "⏳ Pending - Funcionalidades administrador"
@@ -167,6 +169,17 @@ async def health_check():
                     "Inventario para bodegueros",
                     "Inventario para administradores"
                 ]
+            },
+            "mayoreo": { # ✅ NUEVO
+                "status": "active",
+                "endpoints_count": "10+",
+                "features": [
+                    "CRUD productos de mayoreo (Solo administradores)",
+                    "Gestión de ventas de mayoreo",
+                    "Búsqueda y filtros avanzados",
+                    "Estadísticas y reportes",
+                    "Validación automática de stock"
+                ]
             }
         }
     }
@@ -215,6 +228,20 @@ async def list_modules():
                     "Inventario para bodegueros (solo bodegas)",
                     "Inventario para administradores (locales y bodegas)",
                     "Filtros avanzados por marca, modelo, talla"
+                ],
+                "status": "implemented" # ✅ NUEVO
+            },
+            {
+                "name": "mayoreo",
+                "prefix": "/mayoreo",
+                "description": "Gestión de productos y ventas de mayoreo (Solo administradores)",
+                "features": [
+                    "CRUD completo de productos de mayoreo",
+                    "Gestión de ventas de mayoreo",
+                    "Búsqueda y filtros avanzados",
+                    "Estadísticas y reportes",
+                    "Validación automática de stock",
+                    "Control de permisos por rol"
                 ],
                 "status": "implemented" # ✅ NUEVO
             },
@@ -334,6 +361,56 @@ async def test_inventory_module():
                 "warehouse_keeper": "Solo ve inventario de bodegas asignadas",
                 "admin": "Ve inventario de locales y bodegas asignadas",
                 "seller": "Acceso general con filtros"
+            }
+        }
+    }
+
+@api_router.get("/dev/test-mayoreo")
+async def test_mayoreo_module():
+    """
+    Endpoint para testear el módulo de mayoreo
+    """
+    return {
+        "module": "mayoreo",
+        "test_status": "ready",
+        "test_endpoints": [
+            "GET /api/v1/mayoreo/health - Health check del módulo",
+            "POST /api/v1/mayoreo/ - Crear producto de mayoreo",
+            "GET /api/v1/mayoreo/ - Listar todos los productos",
+            "GET /api/v1/mayoreo/search/ - Buscar productos con filtros",
+            "GET /api/v1/mayoreo/{id} - Obtener producto por ID",
+            "PUT /api/v1/mayoreo/{id} - Actualizar producto",
+            "DELETE /api/v1/mayoreo/{id} - Eliminar producto",
+            "POST /api/v1/mayoreo/ventas/ - Crear venta de mayoreo",
+            "GET /api/v1/mayoreo/ventas/ - Listar todas las ventas",
+            "GET /api/v1/mayoreo/ventas/search/ - Buscar ventas con filtros",
+            "GET /api/v1/mayoreo/{id}/ventas/ - Ventas de un producto específico",
+            "GET /api/v1/mayoreo/stats/ - Estadísticas de mayoreo"
+        ],
+        "auth_required": True,
+        "roles_allowed": ["administrador"],
+        "test_users": [
+            "admin@tustockya.com / admin123"
+        ],
+        "test_parameters": {
+            "mayoreo_create": {
+                "modelo": "SS-9012",
+                "foto": "http://url.aqui/foto_ejemplo.jpg",
+                "tallas": "36-39/6666, 40-44/6662",
+                "cantidad_cajas_disponibles": 2,
+                "pares_por_caja": 24,
+                "precio": 58.00
+            },
+            "venta_create": {
+                "mayoreo_id": 1,
+                "cantidad_cajas_vendidas": 5,
+                "precio_unitario_venta": 55.00,
+                "notas": "Cliente compró para exportación a Panamá"
+            },
+            "filters": {
+                "modelo": "Filtrar por modelo",
+                "tallas": "Filtrar por tallas disponibles",
+                "is_active": "Filtrar por estado activo (true/false)"
             }
         }
     }
