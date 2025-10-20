@@ -13,6 +13,8 @@ from app.modules.inventory.router import router as inventory_router
 from app.modules.mayoreo.router import router as mayoreo_router
 from app.modules.superadmin.router import router as superadmin_router
 from app.modules.boss.router import router as boss_router
+from app.modules.video_processing import router as video_processing_router
+
 
 from app.modules.admin import admin_router
 
@@ -106,6 +108,12 @@ api_router.include_router(
     superadmin_router,
     prefix="/superadmin",
     tags=["Superadmin - Superadministrador"]
+)
+
+api_router.include_router(
+    video_processing_router,
+    prefix="/api/v1/video-processing",
+    tags=["Video Processing"]
 )
 
 # ==================== ENDPOINTS RAÍZ ACTUALIZADOS ====================

@@ -228,7 +228,7 @@ class CostService:
     async def get_operational_dashboard(self, admin: User) -> OperationalDashboard:
         """Obtener dashboard operativo consolidado"""
         
-        dashboard_data = self.calculator.calculate_operational_dashboard(admin.id)
+        dashboard_data = self.calculator.calculate_operational_dashboard(admin.id, self.company_id)
         
         return OperationalDashboard(**dashboard_data)
     

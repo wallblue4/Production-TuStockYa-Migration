@@ -16,6 +16,8 @@ import logging
 
 from fastapi import APIRouter, Depends, Query, File, UploadFile, Form
 from app.shared.services.cloudinary_service import cloudinary_service
+from app.modules.video_processing.service import VideoProcessingService
+from app.modules.video_processing.repository import VideoProcessingRepository
 
 from app.config.settings import settings
 from .repository import AdminRepository
@@ -2132,6 +2134,540 @@ class AdminService:
             error_message=job.error_message,
             notes=job.notes
         )
+
+    async def process_video_inventory_entry_distributed(
+        self,
+        video_entry: VideoProductEntryDistributed,
+        video_file: UploadFile,
+        reference_image: Optional[UploadFile],
+        admin_user: User
+    ) -> ProductCreationDistributedResponse:
+        """
+        Procesar registro de inventario con distribución por ubicaciones
+        
+        Este método implementa el flujo completo de registro con pies separados:
+        1. Validar permisos sobre ubicaciones
+        2. Procesar video con IA (módulo separado)
+        3. Subir imagen de referencia
+        4. Crear producto
+        5. Crear ProductSize con inventory_type apropiado
+        6. Registrar en historial
+        7. Vincular con video job
+        """
+        
+        start_time = datetime.now()
+        logger = logging.getLogger(__name__)
+        
+        logger.info("=" * 80)
+        logger.info("🚀 INICIANDO REGISTRO DE INVENTARIO CON DISTRIBUCIÓN")
+        logger.info("=" * 80)
+        logger.info(f"📋 Admin: {admin_user.full_name} (ID: {admin_user.id})")
+        logger.info(f"📦 Producto: {video_entry.product_brand} {video_entry.product_model}")
+        logger.info(f"👟 Total zapatos: {video_entry.total_shoes}")
+        logger.info(f"   • Pares completos: {video_entry.total_pairs}")
+        logger.info(f"   • Pies individuales: {video_entry.total_individual_feet}")
+        logger.info(f"📍 Ubicaciones: {len(video_entry.locations_involved)}")
+        logger.info(f"📏 Tallas: {len(video_entry.sizes_distribution)}")
+        
+        try:
+            # ==================== PASO 1: VALIDAR PERMISOS ====================
+            logger.info("\n" + "─" * 80)
+            logger.info("📋 PASO 1: Validando permisos sobre ubicaciones")
+            logger.info("─" * 80)
+            
+            managed_locations = self.repository.get_managed_locations(
+                admin_user.id,
+                self.company_id
+            )
+            managed_location_ids = {loc.id for loc in managed_locations}
+            
+            logger.info(f"✓ Ubicaciones gestionadas por admin: {len(managed_location_ids)}")
+            logger.info(f"✓ Ubicaciones requeridas: {video_entry.locations_involved}")
+            
+            # Verificar acceso a todas las ubicaciones
+            unauthorized_locations = video_entry.locations_involved - managed_location_ids
+            
+            if unauthorized_locations:
+                logger.error(f"❌ Sin permisos para ubicaciones: {unauthorized_locations}")
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"No tienes permisos para las ubicaciones: {unauthorized_locations}. "
+                        f"Contacta al administrador principal para obtener acceso."
+                    )
+                )
+            
+            logger.info("✅ Todos los permisos validados correctamente")
+            
+            # Obtener información detallada de ubicaciones
+            locations_info = {}
+            for location_id in video_entry.locations_involved:
+                location = self.db.query(Location).filter(
+                    and_(
+                        Location.id == location_id,
+                        Location.company_id == self.company_id
+                    )
+                ).first()
+                
+                if not location:
+                    raise HTTPException(404, f"Ubicación {location_id} no encontrada")
+                
+                locations_info[location_id] = {
+                    "id": location.id,
+                    "name": location.name,
+                    "type": location.type,
+                    "address": location.address
+                }
+                
+                logger.info(f"   ✓ {location.name} ({location.type}) - ID: {location.id}")
+            
+            # ==================== PASO 2: PROCESAR VIDEO CON IA ====================
+            logger.info("\n" + "─" * 80)
+            logger.info("🎥 PASO 2: Procesando video con IA")
+            logger.info("─" * 80)
+            
+            # Determinar bodega principal para el video job
+            primary_warehouse_id = self._get_primary_warehouse_from_distribution(
+                video_entry.sizes_distribution,
+                locations_info
+            )
+            
+            logger.info(f"✓ Bodega principal: {locations_info[primary_warehouse_id]['name']}")
+            
+            # Crear servicio de video processing
+            video_service = VideoProcessingService(self.db, self.company_id)
+            
+            # Procesar video
+            video_job = await video_service.create_and_process_job(
+                video_file=video_file,
+                user_id=admin_user.id,
+                warehouse_location_id=primary_warehouse_id,
+                estimated_quantity=video_entry.total_shoes,
+                product_brand=video_entry.product_brand,
+                product_model=video_entry.product_model,
+                expected_sizes=','.join([sd.size for sd in video_entry.sizes_distribution]),
+                notes=video_entry.notes,
+                priority="normal"
+            )
+            
+            logger.info(f"✅ Video job creado: ID={video_job.id}")
+            logger.info(f"   Estado: {video_job.processing_status}")
+            logger.info(f"   Archivo: {video_job.original_filename}")
+            
+            # ==================== PASO 3: SUBIR IMAGEN DE REFERENCIA ====================
+            image_url = None
+            if reference_image:
+                logger.info("\n" + "─" * 80)
+                logger.info("📸 PASO 3: Subiendo imagen de referencia a Cloudinary")
+                logger.info("─" * 80)
+                
+                try:
+                    image_url = await self._upload_reference_image(reference_image)
+                    logger.info(f"✅ Imagen subida exitosamente")
+                    logger.info(f"   URL: {image_url}")
+                except Exception as e:
+                    logger.warning(f"⚠️  Error al subir imagen: {str(e)}")
+                    logger.warning("   Continuando sin imagen de referencia...")
+            else:
+                logger.info("\n📸 PASO 3: Sin imagen de referencia (opcional)")
+            
+            # ==================== PASO 4: CREAR PRODUCTO ====================
+            logger.info("\n" + "─" * 80)
+            logger.info("🔄 PASO 4: Creando registro de producto")
+            logger.info("─" * 80)
+            
+            # Generar código de referencia único
+            reference_code = self._generate_reference_code(
+                video_entry.product_brand,
+                video_entry.product_model
+            )
+            
+            logger.info(f"✓ Código de referencia generado: {reference_code}")
+            
+            # Usar información del usuario (IA se procesa asíncrono)
+            final_brand = video_entry.product_brand or "Sin Marca"
+            final_model = video_entry.product_model or "Sin Modelo"
+            
+            new_product = Product(
+                reference_code=reference_code,
+                description=f"{final_brand} {final_model}",
+                brand=final_brand,
+                model=final_model,
+                color_info=None,  # Se actualizará con callback del video
+                video_url=None,   # Se actualizará con callback del video
+                image_url=image_url,
+                unit_price=video_entry.unit_price,
+                box_price=video_entry.box_price,
+                location_name="DISTRIBUTED",  # Marcador especial
+                is_active=1,
+                company_id=self.company_id,
+                created_at=start_time,
+                updated_at=start_time
+            )
+            
+            self.db.add(new_product)
+            self.db.flush()
+            
+            logger.info(f"✅ Producto creado")
+            logger.info(f"   ID: {new_product.id}")
+            logger.info(f"   Referencia: {reference_code}")
+            logger.info(f"   Descripción: {new_product.description}")
+            logger.info(f"   Precio unitario: ${new_product.unit_price:,.0f}")
+            if new_product.box_price:
+                logger.info(f"   Precio caja: ${new_product.box_price:,.0f}")
+            
+            # ==================== PASO 5: CREAR PRODUCT_SIZES ====================
+            logger.info("\n" + "─" * 80)
+            logger.info("📏 PASO 5: Creando registros de tallas (ProductSize)")
+            logger.info("─" * 80)
+            
+            created_sizes_count = 0
+            distribution_summary = {}
+            
+            for size_dist in video_entry.sizes_distribution:
+                logger.info(f"\n📐 Procesando talla {size_dist.size}:")
+                logger.info(f"   • {size_dist.total_pairs} pares completos")
+                logger.info(f"   • {size_dist.total_left_feet} pies izquierdos")
+                logger.info(f"   • {size_dist.total_right_feet} pies derechos")
+                
+                # ========== CREAR PARES COMPLETOS ==========
+                for pair_entry in size_dist.pairs:
+                    location = locations_info[pair_entry.location_id]
+                    
+                    product_size = ProductSize(
+                        product_id=new_product.id,
+                        size=size_dist.size,
+                        quantity=pair_entry.quantity,
+                        inventory_type='pair',  # 🆕 TIPO: PAR COMPLETO
+                        quantity_exhibition=0,
+                        location_name=location['name'],
+                        company_id=self.company_id,
+                        created_at=start_time,
+                        updated_at=start_time
+                    )
+                    
+                    self.db.add(product_size)
+                    created_sizes_count += 1
+                    
+                    # Actualizar resumen
+                    if location['name'] not in distribution_summary:
+                        distribution_summary[location['name']] = {
+                            "pairs": 0,
+                            "left": 0,
+                            "right": 0,
+                            "location_type": location['type']
+                        }
+                    distribution_summary[location['name']]["pairs"] += pair_entry.quantity
+                    
+                    logger.info(f"      ✅ {pair_entry.quantity} pares → {location['name']} ({location['type']})")
+                
+                # ========== CREAR PIES IZQUIERDOS ==========
+                for left_entry in size_dist.left_feet:
+                    location = locations_info[left_entry.location_id]
+                    
+                    product_size = ProductSize(
+                        product_id=new_product.id,
+                        size=size_dist.size,
+                        quantity=left_entry.quantity,
+                        inventory_type='left_only',  # 🆕 TIPO: SOLO IZQUIERDO
+                        quantity_exhibition=0,
+                        location_name=location['name'],
+                        company_id=self.company_id,
+                        created_at=start_time,
+                        updated_at=start_time
+                    )
+                    
+                    self.db.add(product_size)
+                    created_sizes_count += 1
+                    
+                    # Actualizar resumen
+                    if location['name'] not in distribution_summary:
+                        distribution_summary[location['name']] = {
+                            "pairs": 0,
+                            "left": 0,
+                            "right": 0,
+                            "location_type": location['type']
+                        }
+                    distribution_summary[location['name']]["left"] += left_entry.quantity
+                    
+                    logger.info(f"      ✅ {left_entry.quantity} pie(s) izquierdo(s) → {location['name']} ({location['type']})")
+                
+                # ========== CREAR PIES DERECHOS ==========
+                for right_entry in size_dist.right_feet:
+                    location = locations_info[right_entry.location_id]
+                    
+                    product_size = ProductSize(
+                        product_id=new_product.id,
+                        size=size_dist.size,
+                        quantity=right_entry.quantity,
+                        inventory_type='right_only',  # 🆕 TIPO: SOLO DERECHO
+                        quantity_exhibition=0,
+                        location_name=location['name'],
+                        company_id=self.company_id,
+                        created_at=start_time,
+                        updated_at=start_time
+                    )
+                    
+                    self.db.add(product_size)
+                    created_sizes_count += 1
+                    
+                    # Actualizar resumen
+                    if location['name'] not in distribution_summary:
+                        distribution_summary[location['name']] = {
+                            "pairs": 0,
+                            "left": 0,
+                            "right": 0,
+                            "location_type": location['type']
+                        }
+                    distribution_summary[location['name']]["right"] += right_entry.quantity
+                    
+                    logger.info(f"      ✅ {right_entry.quantity} pie(s) derecho(s) → {location['name']} ({location['type']})")
+            
+            logger.info(f"\n✅ Total ProductSize records creados: {created_sizes_count}")
+            
+            # ==================== PASO 6: VINCULAR VIDEO JOB ====================
+            logger.info("\n" + "─" * 80)
+            logger.info("🔗 PASO 6: Vinculando video job con producto")
+            logger.info("─" * 80)
+            
+            video_repo = VideoProcessingRepository(self.db)
+            video_repo.link_created_product(
+                job_id=video_job.id,
+                product_id=new_product.id
+            )
+            
+            logger.info(f"✅ Video job {video_job.id} vinculado con producto {new_product.id}")
+            
+            # ==================== PASO 7: REGISTRAR EN HISTORIAL ====================
+            logger.info("\n" + "─" * 80)
+            logger.info("📝 PASO 7: Registrando en historial de cambios")
+            logger.info("─" * 80)
+            
+            inventory_change = InventoryChange(
+                product_id=new_product.id,
+                change_type="distributed_inventory_creation",
+                quantity_before=0,
+                quantity_after=video_entry.total_shoes,
+                user_id=admin_user.id,
+                company_id=self.company_id,
+                notes=(
+                    f"Inventario distribuido creado con sistema de pies separados. "
+                    f"Distribución: {video_entry.total_pairs} pares completos + "
+                    f"{video_entry.total_left_feet} pies izquierdos + "
+                    f"{video_entry.total_right_feet} pies derechos = "
+                    f"{video_entry.total_shoes} zapatos totales distribuidos en "
+                    f"{len(video_entry.locations_involved)} ubicaciones. "
+                    f"Video Job ID: {video_job.id}. "
+                    f"{video_entry.notes or ''}"
+                ),
+                created_at=start_time
+            )
+            
+            self.db.add(inventory_change)
+            self.db.flush()
+            
+            # Vincular inventory_change con video job
+            video_repo.link_created_product(
+                job_id=video_job.id,
+                product_id=new_product.id,
+                inventory_change_id=inventory_change.id
+            )
+            
+            logger.info(f"✅ Inventory change creado: ID={inventory_change.id}")
+            
+            # ==================== PASO 8: COMMIT FINAL ====================
+            logger.info("\n" + "─" * 80)
+            logger.info("💾 PASO 8: Guardando todos los cambios")
+            logger.info("─" * 80)
+            
+            self.db.commit()
+            self.db.refresh(new_product)
+            
+            processing_time = (datetime.now() - start_time).total_seconds()
+            
+            logger.info("✅ Commit exitoso - Todos los datos guardados")
+            
+            # ==================== RESUMEN FINAL ====================
+            logger.info("\n" + "=" * 80)
+            logger.info("🎉 REGISTRO COMPLETADO EXITOSAMENTE")
+            logger.info("=" * 80)
+            logger.info(f"⏱️  Tiempo total: {processing_time:.2f} segundos")
+            logger.info(f"📦 Producto ID: {new_product.id}")
+            logger.info(f"🔖 Referencia: {reference_code}")
+            logger.info(f"👟 Total zapatos: {video_entry.total_shoes}")
+            logger.info(f"📍 Ubicaciones: {len(video_entry.locations_involved)}")
+            logger.info(f"📏 ProductSize records: {created_sizes_count}")
+            logger.info(f"🎥 Video Job ID: {video_job.id}")
+            logger.info("\n📊 DISTRIBUCIÓN POR UBICACIÓN:")
+            for loc_name, counts in distribution_summary.items():
+                logger.info(f"   • {loc_name} ({counts['location_type']}):")
+                logger.info(f"      - {counts['pairs']} pares completos")
+                logger.info(f"      - {counts['left']} pies izquierdos")
+                logger.info(f"      - {counts['right']} pies derechos")
+            logger.info("=" * 80 + "\n")
+            
+            # ==================== PASO 9: RESPUESTA ====================
+            return ProductCreationDistributedResponse(
+                success=True,
+                message=(
+                    f"✅ Producto '{final_brand} {final_model}' creado exitosamente con "
+                    f"distribución en {len(video_entry.locations_involved)} ubicaciones. "
+                    f"Video procesándose en segundo plano (Job ID: {video_job.id}). "
+                    f"Recibirás una notificación cuando el procesamiento de IA complete."
+                ),
+                product_id=new_product.id,
+                reference_code=reference_code,
+                brand=final_brand,
+                model=final_model,
+                image_url=image_url,
+                distribution_summary=distribution_summary,
+                total_shoes=video_entry.total_shoes,
+                total_pairs=video_entry.total_pairs,
+                total_individual_feet=video_entry.total_individual_feet,
+                locations_count=len(video_entry.locations_involved),
+                sizes_count=len(video_entry.sizes_distribution),
+                processing_time_seconds=round(processing_time, 2)
+            )
+        
+        except HTTPException:
+            self.db.rollback()
+            raise
+        except Exception as e:
+            self.db.rollback()
+            logger.error("\n" + "=" * 80)
+            logger.error("❌ ERROR EN REGISTRO DISTRIBUIDO")
+            logger.error("=" * 80)
+            logger.error(f"Tipo: {type(e).__name__}")
+            logger.error(f"Mensaje: {str(e)}")
+            logger.exception(e)
+            logger.error("=" * 80 + "\n")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error al procesar registro de inventario: {str(e)}"
+            )
+
+
+    def _get_primary_warehouse_from_distribution(
+        self,
+        sizes_distribution: List[SizeDistributionEntry],
+        locations_info: Dict[int, Dict]
+    ) -> int:
+        """
+        Determinar bodega principal basada en la distribución
+        
+        Prioriza:
+        1. Bodega con más pares completos
+        2. Primera bodega encontrada
+        3. Cualquier ubicación si no hay bodegas
+        """
+        
+        warehouse_pairs = {}
+        
+        # Contar pares por bodega
+        for size_dist in sizes_distribution:
+            for pair_entry in size_dist.pairs:
+                location = locations_info[pair_entry.location_id]
+                if location['type'] == 'bodega':
+                    if pair_entry.location_id not in warehouse_pairs:
+                        warehouse_pairs[pair_entry.location_id] = 0
+                    warehouse_pairs[pair_entry.location_id] += pair_entry.quantity
+        
+        # Retornar bodega con más pares
+        if warehouse_pairs:
+            return max(warehouse_pairs, key=warehouse_pairs.get)
+        
+        # Si no hay pares en bodegas, buscar cualquier bodega
+        for location_id, location in locations_info.items():
+            if location['type'] == 'bodega':
+                return location_id
+        
+        # Fallback: retornar primera ubicación
+        return list(locations_info.keys())[0]
+
+
+    def _generate_reference_code(self, brand: str, model: str) -> str:
+        """
+        Generar código de referencia único
+        
+        Formato: BRAND-MODEL-XXXX
+        Ejemplo: NIKE-AM90-1234
+        """
+        import random
+        import string
+        from unidecode import unidecode
+        
+        # Limpiar y normalizar brand
+        brand_clean = unidecode(brand or "PROD")
+        brand_part = ''.join(c for c in brand_clean if c.isalnum())[:4].upper()
+        if not brand_part:
+            brand_part = "PROD"
+        
+        # Limpiar y normalizar model
+        model_clean = unidecode(model or "MODEL")
+        model_part = ''.join(c for c in model_clean if c.isalnum())[:4].upper()
+        if not model_part:
+            model_part = "MODL"
+        
+        # Generar parte aleatoria
+        random_part = ''.join(random.choices(string.digits, k=4))
+        
+        reference_code = f"{brand_part}-{model_part}-{random_part}"
+        
+        # Verificar unicidad
+        exists = self.db.query(Product).filter(
+            and_(
+                Product.reference_code == reference_code,
+                Product.company_id == self.company_id
+            )
+        ).first()
+        
+        if exists:
+            # Si existe, regenerar recursivamente
+            return self._generate_reference_code(brand, model)
+        
+        return reference_code
+
+
+    async def _upload_reference_image(self, image_file: UploadFile) -> str:
+        """
+        Subir imagen de referencia a Cloudinary
+        
+        Returns:
+            URL de la imagen subida
+        """
+        import cloudinary
+        import cloudinary.uploader
+        
+        try:
+            # Configurar Cloudinary
+            cloudinary.config(
+                cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+                api_key=settings.CLOUDINARY_API_KEY,
+                api_secret=settings.CLOUDINARY_API_SECRET
+            )
+            
+            # Leer contenido de la imagen
+            await image_file.seek(0)
+            image_content = await image_file.read()
+            
+            # Subir a Cloudinary
+            result = cloudinary.uploader.upload(
+                image_content,
+                folder="product_references",
+                resource_type="image",
+                format="jpg",
+                transformation=[
+                    {'width': 800, 'height': 800, 'crop': 'limit'},
+                    {'quality': 'auto:good'}
+                ]
+            )
+            
+            return result['secure_url']
+        
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error subiendo imagen a Cloudinary: {str(e)}")
+            raise Exception(f"Error al subir imagen: {str(e)}")
 
 
 # ==================== DECORADORES ====================

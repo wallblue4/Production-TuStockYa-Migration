@@ -1,6 +1,8 @@
-from typing import List
+from typing import List ,Dict
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
+
+from app.shared.database.models import Location
 
 from .repository import InventoryRepository
 from .schemas import ProductResponse, InventorySearchParams, InventoryByRoleParams, GroupedInventoryResponse, LocationInventoryResponse, LocationInfo, ProductInfo, SimpleInventoryResponse, SimpleLocationInventory
@@ -505,3 +507,333 @@ class InventoryService:
                 status_code=500,
                 detail=f"Error obteniendo inventario simplificado del administrador: {str(e)}"
             )
+
+    
+    async def get_enhanced_availability(
+        self,
+        reference_code: str,
+        size: str,
+        user_location_id: int,
+        user_id: int
+    ) -> Dict[str, any]:
+        """
+        Obtener disponibilidad mejorada con información de pies separados
+        
+        Este método es usado por el scanner para mostrar información completa
+        """
+        
+        start_time = datetime.now()
+        
+        # Obtener producto
+        product = self.repository.get_product_by_reference(reference_code, self.company_id)
+        
+        if not product:
+            return {
+                "success": False,
+                "message": "Producto no encontrado"
+            }
+        
+        # Obtener ubicación actual
+        user_location = self.db.query(Location).filter(
+            and_(
+                Location.id == user_location_id,
+                Location.company_id == self.company_id
+            )
+        ).first()
+        
+        if not user_location:
+            raise HTTPException(404, "Ubicación no encontrada")
+        
+        # 1. Disponibilidad local
+        local_avail = self.repository.get_local_availability(
+            product_id=product.id,
+            size=size,
+            location_name=user_location.name,
+            company_id=self.company_id
+        )
+        
+        # 2. Distribución global
+        global_dist = self.repository.get_global_distribution(
+            product_id=product.id,
+            size=size,
+            company_id=self.company_id,
+            current_location_id=user_location_id
+        )
+        
+        # 3. Oportunidades de formación
+        opportunities = self.repository.find_formation_opportunities(
+            product_id=product.id,
+            size=size,
+            company_id=self.company_id
+        )
+        
+        # 4. Construir disponibilidad local
+        local_availability = self._build_local_availability(
+            local_avail,
+            user_location
+        )
+        
+        # 5. Generar sugerencias
+        suggestions = self._generate_suggestions(
+            local_avail,
+            global_dist,
+            opportunities,
+            user_location
+        )
+        
+        processing_time = (datetime.now() - start_time).total_seconds() * 1000
+        
+        return {
+            "success": True,
+            "scan_timestamp": datetime.now().isoformat(),
+            "product": {
+                "product_id": product.id,
+                "reference_code": product.reference_code,
+                "brand": product.brand,
+                "model": product.model,
+                "size": size,
+                "unit_price": float(product.unit_price),
+                "image_url": product.image_url
+            },
+            "local_availability": local_availability,
+            "global_distribution": global_dist,
+            "formation_opportunities": self._format_opportunities(opportunities),
+            "suggestions": suggestions,
+            "processing_time_ms": round(processing_time, 2)
+        }
+    
+    def _build_local_availability(
+        self,
+        local_avail: Dict,
+        location: Location
+    ) -> Dict:
+        """Construir objeto de disponibilidad local"""
+        
+        pairs_available = local_avail['pairs'] - local_avail['pairs_exhibition']
+        can_sell = pairs_available > 0
+        
+        left_available = local_avail['left_feet'] > 0
+        right_available = local_avail['right_feet'] > 0
+        can_form_pair = left_available and right_available
+        
+        # Determinar qué falta
+        missing = None
+        if not can_form_pair and not can_sell:
+            if not left_available and not right_available:
+                missing = 'both'
+            elif not left_available:
+                missing = 'left'
+            elif not right_available:
+                missing = 'right'
+        
+        # Construir resumen
+        if can_sell:
+            summary = {
+                "can_sell_now": True,
+                "reason": f"Tienes {pairs_available} par(es) disponible(s) para venta",
+                "action_required": None
+            }
+        elif can_form_pair:
+            summary = {
+                "can_sell_now": False,
+                "reason": f"Puedes formar {min(local_avail['left_feet'], local_avail['right_feet'])} par(es) con pies disponibles",
+                "action_required": "Formar par localmente"
+            }
+        elif missing == 'both':
+            summary = {
+                "can_sell_now": False,
+                "reason": "No hay inventario disponible en tu ubicación",
+                "action_required": "Solicitar transferencia"
+            }
+        else:
+            missing_name = "izquierdo" if missing == 'left' else "derecho"
+            summary = {
+                "can_sell_now": False,
+                "reason": f"Tienes pie {missing_name} pero falta el opuesto",
+                "action_required": f"Solicitar pie {missing_name} faltante"
+            }
+        
+        return {
+            "location_id": location.id,
+            "location_name": location.name,
+            "location_type": location.type,
+            "pairs": {
+                "quantity": local_avail['pairs'],
+                "quantity_exhibition": local_avail['pairs_exhibition'],
+                "quantity_available_sale": pairs_available,
+                "can_sell": can_sell
+            },
+            "individual_feet": {
+                "left": {
+                    "quantity": local_avail['left_feet'],
+                    "available": left_available
+                },
+                "right": {
+                    "quantity": local_avail['right_feet'],
+                    "available": right_available
+                },
+                "can_form_pair": can_form_pair,
+                "missing": missing
+            },
+            "summary": summary
+        }
+    
+    def _generate_suggestions(
+        self,
+        local_avail: Dict,
+        global_dist: Dict,
+        opportunities: List[Dict],
+        current_location: Location
+    ) -> List[Dict]:
+        """
+        Generar sugerencias accionables para el vendedor
+        
+        Prioriza:
+        1. Formar par localmente (si tiene ambos pies)
+        2. Solicitar par completo desde bodega más cercana
+        3. Solicitar pie faltante para formar par
+        4. Restock general
+        """
+        
+        suggestions = []
+        
+        # Sugerencia 1: Formar par localmente
+        if local_avail['left_feet'] > 0 and local_avail['right_feet'] > 0:
+            formable = min(local_avail['left_feet'], local_avail['right_feet'])
+            suggestions.append({
+                "priority": "urgent",
+                "type": "form_pair",
+                "action": f"Formar {formable} par(es) con pies disponibles en tu ubicación",
+                "estimated_time_minutes": 1,
+                "cost_estimate": 0,
+                "steps": [
+                    "Ir a sección de formación de pares",
+                    "Seleccionar cantidad a formar",
+                    "Confirmar formación",
+                    "Pares listos para venta"
+                ]
+            })
+        
+        # Sugerencia 2: Solicitar par completo desde bodega
+        for loc in global_dist['by_location']:
+            if loc['pairs'] > 0 and loc['location_type'] == 'bodega':
+                suggestions.append({
+                    "priority": "high",
+                    "type": "transfer_pair",
+                    "action": f"Solicitar par completo desde {loc['location_name']}",
+                    "estimated_time_minutes": 15,
+                    "cost_estimate": 5000,
+                    "steps": [
+                        "Crear solicitud de transferencia",
+                        f"Bodeguero en {loc['location_name']} prepara el par",
+                        "Corredor transporta",
+                        "Recibes en tu local"
+                    ],
+                    "metadata": {
+                        "from_location_id": loc['location_id'],
+                        "from_location_name": loc['location_name'],
+                        "available_quantity": loc['pairs']
+                    }
+                })
+                break  # Solo sugerir la primera bodega
+        
+        # Sugerencia 3: Solicitar pie faltante
+        if (local_avail['left_feet'] > 0 and local_avail['right_feet'] == 0) or \
+           (local_avail['right_feet'] > 0 and local_avail['left_feet'] == 0):
+            
+            missing_side = 'right' if local_avail['right_feet'] == 0 else 'left'
+            missing_name = 'derecho' if missing_side == 'right' else 'izquierdo'
+            
+            # Buscar pie opuesto
+            opposite_locations = self.repository.find_opposite_foot(
+                product_id=global_dist.get('product_id') if 'product_id' in global_dist else None,
+                size=None,  # Necesitamos pasar el size
+                foot_side=missing_side,
+                current_location_id=current_location.id,
+                company_id=self.company_id
+            )
+            
+            if opposite_locations:
+                closest = opposite_locations[0]
+                suggestions.append({
+                    "priority": "medium",
+                    "type": "form_pair",
+                    "action": f"Traer pie {missing_name} desde {closest['location_name']} para formar par",
+                    "estimated_time_minutes": 45,
+                    "cost_estimate": 3000,
+                    "steps": [
+                        f"Solicitar transferencia de pie {missing_name}",
+                        "Corredor transporta",
+                        "Formar par al recibir",
+                        "Par listo para venta"
+                    ],
+                    "metadata": {
+                        "from_location_id": closest['location_id'],
+                        "from_location_name": closest['location_name'],
+                        "foot_side": missing_side,
+                        "available_quantity": closest['quantity']
+                    }
+                })
+        
+        # Sugerencia 4: Restock si no hay nada disponible cerca
+        if not suggestions and global_dist['totals']['total_potential_pairs'] == 0:
+            suggestions.append({
+                "priority": "low",
+                "type": "restock",
+                "action": "No hay inventario disponible. Solicitar restock al administrador",
+                "estimated_time_minutes": 1440,  # 24 horas
+                "cost_estimate": None,
+                "steps": [
+                    "Crear solicitud de restock",
+                    "Administrador procesa pedido",
+                    "Proveedor envía mercancía",
+                    "Inventario disponible"
+                ]
+            })
+        
+        return suggestions
+    
+    def _format_opportunities(self, opportunities: List[Dict]) -> List[Dict]:
+        """Formatear oportunidades de formación para la respuesta"""
+        
+        formatted = []
+        
+        for opp in opportunities:
+            if opp.get('same_location'):
+                # Oportunidad en misma ubicación
+                formatted.append({
+                    "formable_pairs": opp['formable_pairs'],
+                    "type": "same_location",
+                    "location_id": opp['location_id'],
+                    "location_name": opp['location_name'],
+                    "left_quantity": opp['left_quantity'],
+                    "right_quantity": opp['right_quantity'],
+                    "priority": "high",
+                    "estimated_time_hours": 0,
+                    "action": f"Formar {opp['formable_pairs']} par(es) en {opp['location_name']} (misma ubicación)"
+                })
+            else:
+                # Oportunidad entre ubicaciones diferentes
+                formatted.append({
+                    "formable_pairs": opp['formable_pairs'],
+                    "type": "cross_location",
+                    "from_locations": [
+                        {
+                            "location_id": opp['left_location_id'],
+                            "location_name": opp['left_location_name'],
+                            "type": "left",
+                            "quantity": opp['left_quantity']
+                        },
+                        {
+                            "location_id": opp['right_location_id'],
+                            "location_name": opp['right_location_name'],
+                            "type": "right",
+                            "quantity": opp['right_quantity']
+                        }
+                    ],
+                    "priority": "medium",
+                    "estimated_time_hours": 2.0,
+                    "action": f"Formar {opp['formable_pairs']} par(es) juntando pies de {opp['left_location_name']} y {opp['right_location_name']}"
+                })
+        
+        return formatted

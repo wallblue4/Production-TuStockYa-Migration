@@ -2,7 +2,7 @@
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, Date, Text, 
     Numeric, ForeignKey, UniqueConstraint, CheckConstraint,
-    func, text
+    func, text ,Enum , Index
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
@@ -284,12 +284,58 @@ class ProductSize(Base, TimestampMixin):
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     size = Column(String(255), nullable=False)
-    quantity = Column(Integer, default=0)
+    quantity = Column(Integer, default=0, nullable=False)
     quantity_exhibition = Column(Integer, default=0)
     location_name = Column(String(255), nullable=False)
+    inventory_type = Column(
+        Enum('pair', 'left_only', 'right_only', name='inventory_type_enum'),
+        default='pair',
+        nullable=False,
+        comment="Tipo: 'pair' (par completo), 'left_only' (solo izquierdo), 'right_only' (solo derecho)"
+    )
+
     
     # Relationships
     product = relationship("Product", back_populates="sizes")
+    company = relationship("Company")
+    
+    # Índice compuesto para queries eficientes
+    __table_args__ = (
+        Index(
+            'idx_product_size_distribution',
+            'product_id', 'size', 'location_name', 'inventory_type', 'company_id'
+        ),
+        # Constraint: solo pares pueden tener exhibición
+        {
+            'comment': 'Tallas de productos con soporte para pies individuales'
+        }
+    )
+    
+    def __repr__(self):
+        return (
+            f"<ProductSize(id={self.id}, product_id={self.product_id}, "
+            f"size='{self.size}', type='{self.inventory_type}', "
+            f"quantity={self.quantity}, location='{self.location_name}')>"
+        )
+    
+    @property
+    def is_pair(self) -> bool:
+        """Verifica si es un par completo"""
+        return self.inventory_type == 'pair'
+    
+    @property
+    def is_single_foot(self) -> bool:
+        """Verifica si es un pie individual"""
+        return self.inventory_type in ['left_only', 'right_only']
+    
+    @property
+    def foot_side(self) -> str:
+        """Retorna el lado del pie si es individual"""
+        if self.inventory_type == 'left_only':
+            return 'left'
+        elif self.inventory_type == 'right_only':
+            return 'right'
+        return 'both'
 
 
 class ProductMapping(Base):

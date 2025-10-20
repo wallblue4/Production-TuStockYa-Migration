@@ -4,6 +4,11 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, date
 from decimal import Decimal
 from enum import Enum
+from app.shared.schemas.inventory_distribution import (
+    LocationQuantity,
+    SizeDistributionEntry
+)
+
 
 class UserRole(str, Enum):
     """Roles de usuario que puede crear el administrador"""
@@ -731,5 +736,193 @@ class ProductCreationError(BaseModel):
                 "error_message": "Error subiendo imagen de referencia",
                 "details": {"cloudinary_error": "Invalid image format"},
                 "timestamp": "2025-09-14T10:30:00"
+            }
+        }
+
+
+class VideoProductEntryDistributed(BaseModel):
+    """
+    Entrada de producto con video IA + distribución de inventario por ubicaciones
+    
+    Permite especificar:
+    - Pares completos en diferentes ubicaciones
+    - Pies izquierdos en ubicaciones específicas (exhibición)
+    - Pies derechos en ubicaciones específicas (exhibición)
+    """
+    
+    # Información del producto
+    product_brand: Optional[str] = Field(None, max_length=255, description="Marca del producto")
+    product_model: Optional[str] = Field(None, max_length=255, description="Modelo del producto")
+    unit_price: Decimal = Field(..., gt=0, description="Precio unitario del producto")
+    box_price: Optional[Decimal] = Field(None, ge=0, description="Precio por caja (opcional)")
+    notes: Optional[str] = Field(None, max_length=1000, description="Notas adicionales")
+    
+    # 🆕 DISTRIBUCIÓN POR TALLAS Y UBICACIONES
+    sizes_distribution: List[SizeDistributionEntry] = Field(
+        ...,
+        min_items=1,
+        max_items=20,
+        description="Distribución de inventario por talla y ubicación"
+    )
+    
+    @validator('sizes_distribution')
+    def validate_distribution(cls, v):
+        """
+        Validar que la distribución sea consistente
+        
+        Reglas:
+        1. Al menos una talla debe tener inventario
+        2. Cada talla debe balancear izquierdos = derechos
+        3. No puede haber tallas duplicadas
+        """
+        if not v:
+            raise ValueError("Debe especificar al menos una talla con distribución")
+        
+        # Verificar tallas duplicadas
+        sizes_seen = set()
+        for size_dist in v:
+            if size_dist.size in sizes_seen:
+                raise ValueError(f"Talla duplicada: {size_dist.size}")
+            sizes_seen.add(size_dist.size)
+        
+        # Validar balance global
+        for size_dist in v:
+            if not size_dist.validate_global_balance():
+                raise ValueError(
+                    f"Talla {size_dist.size}: Desbalance detectado - "
+                    f"{size_dist.total_left_feet} izquierdos vs "
+                    f"{size_dist.total_right_feet} derechos"
+                )
+        
+        # Validar que al menos una talla tenga inventario
+        total_shoes = sum(sd.total_shoes for sd in v)
+        if total_shoes == 0:
+            raise ValueError("Debe especificar al menos una unidad de inventario")
+        
+        if total_shoes > 5000:
+            raise ValueError("El total de zapatos no puede superar 5000 unidades")
+        
+        return v
+    
+    @property
+    def total_pairs(self) -> int:
+        """Total de pares completos en toda la distribución"""
+        return sum(sd.total_pairs for sd in self.sizes_distribution)
+    
+    @property
+    def total_individual_feet(self) -> int:
+        """Total de pies individuales (izq + der)"""
+        total_left = sum(sd.total_left_feet for sd in self.sizes_distribution)
+        total_right = sum(sd.total_right_feet for sd in self.sizes_distribution)
+        return total_left + total_right
+    
+    @property
+    def total_shoes(self) -> int:
+        """Total de zapatos (pares*2 + individuales)"""
+        return (self.total_pairs * 2) + self.total_individual_feet
+    
+    @property
+    def locations_involved(self) -> set:
+        """IDs de todas las ubicaciones involucradas"""
+        location_ids = set()
+        for size_dist in self.sizes_distribution:
+            for pair in size_dist.pairs:
+                location_ids.add(pair.location_id)
+            for left in size_dist.left_feet:
+                location_ids.add(left.location_id)
+            for right in size_dist.right_feet:
+                location_ids.add(right.location_id)
+        return location_ids
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "product_brand": "Nike",
+                "product_model": "Air Max 90",
+                "unit_price": 150000,
+                "box_price": 1350000,
+                "notes": "Lanzamiento nueva colección - Distribución especial",
+                "sizes_distribution": [
+                    {
+                        "size": "42",
+                        "pairs": [
+                            {"location_id": 1, "quantity": 15, "notes": "Bodega principal"},
+                            {"location_id": 5, "quantity": 3, "notes": "Local VIP"}
+                        ],
+                        "left_feet": [
+                            {"location_id": 2, "quantity": 2, "notes": "Exhibición Local Norte"},
+                            {"location_id": 3, "quantity": 1, "notes": "Exhibición Local Sur"}
+                        ],
+                        "right_feet": [
+                            {"location_id": 4, "quantity": 2, "notes": "Exhibición Local Centro"},
+                            {"location_id": 6, "quantity": 1, "notes": "Exhibición Local Este"}
+                        ]
+                    },
+                    {
+                        "size": "43",
+                        "pairs": [
+                            {"location_id": 1, "quantity": 10}
+                        ],
+                        "left_feet": [
+                            {"location_id": 2, "quantity": 1}
+                        ],
+                        "right_feet": [
+                            {"location_id": 3, "quantity": 1}
+                        ]
+                    }
+                ]
+            }
+        }
+
+
+class ProductCreationDistributedResponse(BaseModel):
+    """Respuesta de creación de producto con distribución"""
+    success: bool
+    message: str
+    product_id: int
+    reference_code: str
+    brand: str
+    model: str
+    image_url: Optional[str]
+    
+    # Resumen de distribución
+    distribution_summary: dict = Field(
+        ...,
+        description="Resumen de cómo se distribuyó el inventario"
+    )
+    
+    # Detalles
+    total_shoes: int
+    total_pairs: int
+    total_individual_feet: int
+    locations_count: int
+    sizes_count: int
+    
+    processing_time_seconds: float
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Producto creado exitosamente con distribución en 6 ubicaciones",
+                "product_id": 123,
+                "reference_code": "NIKE-AM90-WHT-001",
+                "brand": "Nike",
+                "model": "Air Max 90",
+                "image_url": "https://cloudinary.com/...",
+                "distribution_summary": {
+                    "Bodega Central": {"pairs": 15, "left": 0, "right": 0},
+                    "Local Norte": {"pairs": 0, "left": 2, "right": 0},
+                    "Local Sur": {"pairs": 0, "left": 1, "right": 0},
+                    "Local Centro": {"pairs": 0, "left": 0, "right": 2},
+                    "Local VIP": {"pairs": 3, "left": 0, "right": 0},
+                    "Local Este": {"pairs": 0, "left": 0, "right": 1}
+                },
+                "total_shoes": 42,
+                "total_pairs": 18,
+                "total_individual_feet": 6,
+                "locations_count": 6,
+                "sizes_count": 2,
+                "processing_time_seconds": 3.45
             }
         }

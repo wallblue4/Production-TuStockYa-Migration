@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional ,Literal
 
 from app.shared.database.models import Product, ProductSize, UserLocationAssignment, Location
 from .schemas import InventorySearchParams, InventoryByRoleParams
@@ -287,3 +287,290 @@ class InventoryRepository:
         result.sort(key=lambda x: (x['brand'] or '', x['model'] or '', x['reference_code'] or ''))
         
         return result
+    
+    def get_local_availability(
+        self,
+        product_id: int,
+        size: str,
+        location_name: str,
+        company_id: int
+    ) -> Dict[str, any]:
+        """
+        Obtener disponibilidad detallada en una ubicación específica
+        
+        Returns:
+            Dict con información de pares y pies individuales
+        """
+        
+        results = self.db.query(
+            ProductSize.inventory_type,
+            ProductSize.quantity,
+            ProductSize.quantity_exhibition
+        ).filter(
+            and_(
+                ProductSize.product_id == product_id,
+                ProductSize.size == size,
+                ProductSize.location_name == location_name,
+                ProductSize.company_id == company_id,
+                ProductSize.quantity > 0
+            )
+        ).all()
+        
+        availability = {
+            'pairs': 0,
+            'pairs_exhibition': 0,
+            'left_feet': 0,
+            'right_feet': 0
+        }
+        
+        for inventory_type, quantity, quantity_exhibition in results:
+            if inventory_type == 'pair':
+                availability['pairs'] = quantity
+                availability['pairs_exhibition'] = quantity_exhibition or 0
+            elif inventory_type == 'left_only':
+                availability['left_feet'] = quantity
+            elif inventory_type == 'right_only':
+                availability['right_feet'] = quantity
+        
+        return availability
+    
+    def get_global_distribution(
+        self,
+        product_id: int,
+        size: str,
+        company_id: int,
+        current_location_id: Optional[int] = None
+    ) -> Dict[str, any]:
+        """
+        Obtener distribución global del producto por ubicaciones
+        
+        Args:
+            product_id: ID del producto
+            size: Talla
+            company_id: ID de la compañía
+            current_location_id: ID de ubicación actual (para calcular distancias)
+        
+        Returns:
+            Dict con distribución completa
+        """
+        
+        # Query principal con información de ubicaciones
+        results = self.db.query(
+            ProductSize.inventory_type,
+            ProductSize.quantity,
+            ProductSize.location_name,
+            Location.id.label('location_id'),
+            Location.type.label('location_type'),
+            Location.address
+        ).join(
+            Location, ProductSize.location_name == Location.name
+        ).filter(
+            and_(
+                ProductSize.product_id == product_id,
+                ProductSize.size == size,
+                ProductSize.company_id == company_id,
+                Location.company_id == company_id,
+                ProductSize.quantity > 0
+            )
+        ).all()
+        
+        # Procesar resultados por ubicación
+        locations = {}
+        totals = {
+            'pairs': 0,
+            'left_feet': 0,
+            'right_feet': 0
+        }
+        
+        for inventory_type, quantity, location_name, location_id, location_type, address in results:
+            if location_name not in locations:
+                locations[location_name] = {
+                    'location_id': location_id,
+                    'location_name': location_name,
+                    'location_type': location_type,
+                    'address': address,
+                    'pairs': 0,
+                    'left_feet': 0,
+                    'right_feet': 0
+                }
+            
+            if inventory_type == 'pair':
+                locations[location_name]['pairs'] += quantity
+                totals['pairs'] += quantity
+            elif inventory_type == 'left_only':
+                locations[location_name]['left_feet'] += quantity
+                totals['left_feet'] += quantity
+            elif inventory_type == 'right_only':
+                locations[location_name]['right_feet'] += quantity
+                totals['right_feet'] += quantity
+        
+        # Calcular pares formables
+        formable_pairs = min(totals['left_feet'], totals['right_feet'])
+        total_potential_pairs = totals['pairs'] + formable_pairs
+        
+        efficiency_percentage = 0
+        if total_potential_pairs > 0:
+            efficiency_percentage = round((totals['pairs'] / total_potential_pairs) * 100, 2)
+        
+        totals.update({
+            'formable_pairs': formable_pairs,
+            'total_potential_pairs': total_potential_pairs,
+            'efficiency_percentage': efficiency_percentage
+        })
+        
+        return {
+            'totals': totals,
+            'by_location': list(locations.values())
+        }
+    
+    def find_formation_opportunities(
+        self,
+        product_id: int,
+        size: str,
+        company_id: int
+    ) -> List[Dict[str, any]]:
+        """
+        Encontrar oportunidades de formación de pares
+        
+        Identifica combinaciones de ubicaciones donde se pueden formar pares
+        al juntar pies izquierdos y derechos.
+        """
+        
+        # Obtener ubicaciones con pies izquierdos
+        left_locations = self.db.query(
+            ProductSize.location_name,
+            Location.id.label('location_id'),
+            ProductSize.quantity
+        ).join(
+            Location, ProductSize.location_name == Location.name
+        ).filter(
+            and_(
+                ProductSize.product_id == product_id,
+                ProductSize.size == size,
+                ProductSize.inventory_type == 'left_only',
+                ProductSize.company_id == company_id,
+                ProductSize.quantity > 0
+            )
+        ).all()
+        
+        # Obtener ubicaciones con pies derechos
+        right_locations = self.db.query(
+            ProductSize.location_name,
+            Location.id.label('location_id'),
+            ProductSize.quantity
+        ).join(
+            Location, ProductSize.location_name == Location.name
+        ).filter(
+            and_(
+                ProductSize.product_id == product_id,
+                ProductSize.size == size,
+                ProductSize.inventory_type == 'right_only',
+                ProductSize.company_id == company_id,
+                ProductSize.quantity > 0
+            )
+        ).all()
+        
+        opportunities = []
+        
+        # Caso especial: misma ubicación
+        for left_loc in left_locations:
+            for right_loc in right_locations:
+                if left_loc.location_name == right_loc.location_name:
+                    formable = min(left_loc.quantity, right_loc.quantity)
+                    if formable > 0:
+                        opportunities.append({
+                            'formable_pairs': formable,
+                            'same_location': True,
+                            'location_id': left_loc.location_id,
+                            'location_name': left_loc.location_name,
+                            'left_quantity': left_loc.quantity,
+                            'right_quantity': right_loc.quantity,
+                            'priority': 'high'  # Misma ubicación = alta prioridad
+                        })
+        
+        # Combinaciones entre ubicaciones diferentes
+        for left_loc in left_locations:
+            for right_loc in right_locations:
+                if left_loc.location_name != right_loc.location_name:
+                    formable = min(left_loc.quantity, right_loc.quantity)
+                    if formable > 0:
+                        opportunities.append({
+                            'formable_pairs': formable,
+                            'same_location': False,
+                            'left_location_id': left_loc.location_id,
+                            'left_location_name': left_loc.location_name,
+                            'left_quantity': left_loc.quantity,
+                            'right_location_id': right_loc.location_id,
+                            'right_location_name': right_loc.location_name,
+                            'right_quantity': right_loc.quantity,
+                            'priority': 'medium'
+                        })
+        
+        # Ordenar por cantidad formable (descendente)
+        opportunities.sort(key=lambda x: x['formable_pairs'], reverse=True)
+        
+        return opportunities
+    
+    def find_opposite_foot(
+        self,
+        product_id: int,
+        size: str,
+        foot_side: Literal['left', 'right'],
+        current_location_id: int,
+        company_id: int
+    ) -> List[Dict[str, any]]:
+        """
+        Buscar el pie opuesto más cercano
+        
+        Args:
+            product_id: ID del producto
+            size: Talla
+            foot_side: Lado del pie que se busca ('left' o 'right')
+            current_location_id: Ubicación actual
+            company_id: ID de la compañía
+        
+        Returns:
+            Lista de ubicaciones con el pie opuesto, ordenadas por distancia
+        """
+        
+        opposite_type = 'right_only' if foot_side == 'left' else 'left_only'
+        
+        results = self.db.query(
+            ProductSize.location_name,
+            Location.id.label('location_id'),
+            Location.type.label('location_type'),
+            ProductSize.quantity,
+            Location.address
+        ).join(
+            Location, ProductSize.location_name == Location.name
+        ).filter(
+            and_(
+                ProductSize.product_id == product_id,
+                ProductSize.size == size,
+                ProductSize.inventory_type == opposite_type,
+                ProductSize.company_id == company_id,
+                Location.company_id == company_id,
+                ProductSize.quantity > 0,
+                Location.id != current_location_id  # Excluir ubicación actual
+            )
+        ).all()
+        
+        opposite_locations = [
+            {
+                'location_id': location_id,
+                'location_name': location_name,
+                'location_type': location_type,
+                'quantity': quantity,
+                'address': address,
+                'foot_side': 'right' if opposite_type == 'right_only' else 'left'
+            }
+            for location_name, location_id, location_type, quantity, address in results
+        ]
+        
+        # TODO: Calcular distancias reales cuando tengamos coordenadas
+        # Por ahora, priorizar bodegas primero
+        opposite_locations.sort(
+            key=lambda x: (0 if x['location_type'] == 'bodega' else 1, x['location_name'])
+        )
+        
+        return opposite_locations

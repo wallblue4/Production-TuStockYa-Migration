@@ -1482,3 +1482,231 @@ async def get_job_logs(
         job_info["processing_time_seconds"] = delta.total_seconds()
     
     return job_info
+
+
+
+
+@router.post("/inventory/video-entry-distributed", response_model=ProductCreationDistributedResponse)
+async def register_inventory_with_distribution(
+    # Información del producto
+    product_brand: str = Form(..., description="Marca del producto"),
+    product_model: str = Form(..., description="Modelo del producto"),
+    unit_price: float = Form(..., gt=0, description="Precio unitario del producto"),
+    box_price: Optional[float] = Form(None, ge=0, description="Precio por caja (opcional)"),
+    notes: Optional[str] = Form(None, description="Notas adicionales"),
+    
+    # 🆕 DISTRIBUCIÓN DE INVENTARIO POR UBICACIONES
+    sizes_distribution_json: str = Form(
+        ...,
+        description="""
+        JSON con distribución de inventario:
+        [
+          {
+            "size": "42",
+            "pairs": [
+              {"location_id": 1, "quantity": 10, "notes": "Bodega principal"}
+            ],
+            "left_feet": [
+              {"location_id": 2, "quantity": 2, "notes": "Exhibición Local 1"}
+            ],
+            "right_feet": [
+              {"location_id": 3, "quantity": 2, "notes": "Exhibición Local 2"}
+            ]
+          }
+        ]
+        
+        REGLAS:
+        - Total izquierdos debe = Total derechos (por talla)
+        - location_id debe ser una ubicación gestionada por el admin
+        - Pares completos pueden ir a bodegas o locales
+        - Pies individuales generalmente para exhibición
+        """
+    ),
+    
+    # Archivos
+    reference_image: Optional[UploadFile] = File(None, description="Imagen de referencia del producto"),
+    video_file: UploadFile = File(..., description="Video del producto para procesamiento IA"),
+    
+    # Auth
+    current_user: User = Depends(require_roles(["administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
+    db: Session = Depends(get_db)
+):
+    """
+    AD016-V2: Registro de inventario con distribución por ubicaciones
+    
+    **Nueva funcionalidad - Sistema de Pies Separados:**
+    
+    Permite distribuir el inventario de un producto entre múltiples ubicaciones
+    especificando exactamente qué hay en cada lugar:
+    
+    **CASOS DE USO:**
+    
+    1. **Registro estándar con exhibición distribuida:**
+```json
+       {
+         "size": "42",
+         "pairs": [
+           {"location_id": 1, "quantity": 15}  // 15 pares en Bodega Central
+         ],
+         "left_feet": [
+           {"location_id": 2, "quantity": 1},  // 1 izquierdo en Local Norte
+           {"location_id": 3, "quantity": 1}   // 1 izquierdo en Local Sur
+         ],
+         "right_feet": [
+           {"location_id": 4, "quantity": 1},  // 1 derecho en Local Centro
+           {"location_id": 5, "quantity": 1}   // 1 derecho en Local Este
+         ]
+       }
+```
+       Total: 15 pares + 2 izq + 2 der = 19 pares equivalentes
+    
+    2. **Almacenamiento en bodega con pies separados:**
+```json
+       {
+         "size": "43",
+         "pairs": [
+           {"location_id": 1, "quantity": 10}
+         ],
+         "left_feet": [
+           {"location_id": 1, "quantity": 5}  // En misma bodega
+         ],
+         "right_feet": [
+           {"location_id": 1, "quantity": 5}  // En misma bodega
+         ]
+       }
+```
+       Nota: Estos 5 pares separados pueden formarse después según demanda
+    
+    3. **Distribución compleja multi-ubicación:**
+```json
+       {
+         "size": "41",
+         "pairs": [
+           {"location_id": 1, "quantity": 8},
+           {"location_id": 6, "quantity": 3}
+         ],
+         "left_feet": [
+           {"location_id": 2, "quantity": 1},
+           {"location_id": 3, "quantity": 1}
+         ],
+         "right_feet": [
+           {"location_id": 4, "quantity": 1},
+           {"location_id": 5, "quantity": 1}
+         ]
+       }
+```
+    
+    **VALIDACIONES AUTOMÁTICAS:**
+    - ✅ Balance: Total izquierdos = Total derechos (por cada talla)
+    - ✅ Permisos: Admin debe gestionar todas las ubicaciones especificadas
+    - ✅ Existencia: Todas las ubicaciones deben existir y ser válidas
+    - ✅ Capacidad: Límites razonables de inventario
+    
+    **PROCESO:**
+    1. Validar JSON de distribución y balance
+    2. Verificar permisos sobre ubicaciones
+    3. Procesar video con IA (módulo video_processing)
+    4. Subir imagen de referencia a Cloudinary
+    5. Generar código de referencia único
+    6. Crear registro de producto
+    7. Crear ProductSize por cada ubicación-tipo-talla
+    8. Registrar en historial de cambios
+    9. Vincular con video job
+    
+    **RETORNA:**
+    - product_id: ID del producto creado
+    - reference_code: Código único generado
+    - distribution_summary: Resumen de distribución por ubicación
+    - total_shoes: Total de zapatos registrados
+    - locations_count: Cantidad de ubicaciones involucradas
+    
+    **EJEMPLO COMPLETO:**
+```bash
+    curl -X POST "http://api.example.com/api/v1/admin/inventory/video-entry-distributed" \
+      -H "Authorization: Bearer <token>" \
+      -F "product_brand=Nike" \
+      -F "product_model=Air Max 90" \
+      -F "unit_price=150000" \
+      -F "box_price=1350000" \
+      -F 'sizes_distribution_json=[
+        {
+          "size": "42",
+          "pairs": [{"location_id": 1, "quantity": 15}],
+          "left_feet": [{"location_id": 2, "quantity": 2}],
+          "right_feet": [{"location_id": 3, "quantity": 2}]
+        }
+      ]' \
+      -F "video_file=@producto.mp4" \
+      -F "reference_image=@imagen.jpg"
+```
+    """
+    
+    service = AdminService(db, current_company_id)
+    
+    # Validar archivos
+    if not video_file.content_type.startswith('video/'):
+        raise HTTPException(400, "El archivo debe ser un video válido (MP4, MOV, AVI)")
+    
+    if video_file.size > 100 * 1024 * 1024:  # 100MB
+        raise HTTPException(400, f"El video no debe superar 100MB (tamaño actual: {video_file.size / 1024 / 1024:.1f}MB)")
+    
+    if reference_image:
+        if not reference_image.content_type.startswith('image/'):
+            raise HTTPException(400, "La imagen de referencia debe ser una imagen válida (JPG, PNG, WebP)")
+        if reference_image.size > 10 * 1024 * 1024:  # 10MB
+            raise HTTPException(400, "La imagen no debe superar 10MB")
+    
+    # Validar precios
+    if unit_price <= 0:
+        raise HTTPException(400, "El precio unitario debe ser mayor a 0")
+    if unit_price > 9999999.99:
+        raise HTTPException(400, "El precio unitario no puede superar $9,999,999.99")
+    if box_price and box_price < 0:
+        raise HTTPException(400, "El precio por caja no puede ser negativo")
+    
+    # Parsear y validar distribución
+    try:
+        sizes_distribution_data = json.loads(sizes_distribution_json)
+        
+        if not isinstance(sizes_distribution_data, list) or len(sizes_distribution_data) == 0:
+            raise ValueError("sizes_distribution debe ser un array con al menos una talla")
+        
+        sizes_distribution = [
+            SizeDistributionEntry(**sd) for sd in sizes_distribution_data
+        ]
+        
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"JSON inválido en sizes_distribution: {str(e)}")
+    except ValidationError as e:
+        # Extraer mensajes de error específicos
+        error_messages = []
+        for error in e.errors():
+            field = " -> ".join(str(x) for x in error['loc'])
+            message = error['msg']
+            error_messages.append(f"{field}: {message}")
+        
+        raise HTTPException(
+            400, 
+            f"Error de validación en distribución: {'; '.join(error_messages)}"
+        )
+    except Exception as e:
+        raise HTTPException(400, f"Error al procesar distribución: {str(e)}")
+    
+    # Crear objeto de entrada
+    video_entry = VideoProductEntryDistributed(
+        product_brand=product_brand,
+        product_model=product_model,
+        unit_price=Decimal(str(unit_price)),
+        box_price=Decimal(str(box_price)) if box_price else None,
+        notes=notes,
+        sizes_distribution=sizes_distribution
+    )
+    
+    # Procesar registro
+    return await service.process_video_inventory_entry_distributed(
+        video_entry=video_entry,
+        video_file=video_file,
+        reference_image=reference_image,
+        admin_user=current_user
+    )

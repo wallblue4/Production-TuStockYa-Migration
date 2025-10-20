@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from .repository import ClassificationRepository
 from .schemas import ProductMatch
+from app.modules.inventory.service import InventoryService
+
 
 class ClassificationService:
     def __init__(self, db: Session, company_id: int):
@@ -337,3 +339,103 @@ class ClassificationService:
         # Si no encuentra marca conocida, usar primera palabra
         first_word = model_name.split()[0] if model_name.split() else 'Unknown'
         return first_word.capitalize()
+
+    async def scan_product(
+        self, 
+        image: UploadFile, 
+        current_user: Any, 
+        include_transfer_options: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Procesar escaneo de producto con IA
+        
+        ACTUALIZADO: Ahora incluye información de pies separados
+        """
+        start_time = datetime.now()
+        
+        try:
+            # Leer contenido de imagen
+            content = await image.read()
+            await image.seek(0)
+            
+            # Intentar clasificación con microservicio
+            classification_result = await self._call_classification_microservice(content)
+            
+            if classification_result and classification_result.get('results'):
+                # Procesar primer resultado (mejor match)
+                best_match = classification_result['results'][0]
+                model_name = best_match.get('model_name', '')
+                brand = self._extract_brand_from_model(model_name) if best_match.get('brand') == 'Unknown' else best_match.get('brand')
+                
+                # Buscar producto en inventario
+                local_products = self.repository.search_products_by_description(
+                    model_name=model_name,
+                    brand=brand,
+                    company_id=self.company_id
+                )
+                
+                if local_products:
+                    product = local_products[0]
+                    
+                    # 🆕 USAR SERVICIO DE INVENTARIO MEJORADO
+                    inventory_service = InventoryService(self.db, self.company_id)
+                    
+                    # Obtener disponibilidad mejorada
+                    # Asumir que queremos la primera talla disponible
+                    product_sizes = self.repository.get_product_sizes(product['id'], self.company_id)
+                    
+                    if product_sizes:
+                        # Tomar primera talla como ejemplo (en producción, el vendedor podría seleccionar)
+                        first_size = product_sizes[0].size
+                        
+                        enhanced_availability = await inventory_service.get_enhanced_availability(
+                            reference_code=product['reference_code'],
+                            size=first_size,
+                            user_location_id=current_user.location_id,
+                            user_id=current_user.id
+                        )
+                        
+                        processing_time = (datetime.now() - start_time).total_seconds() * 1000
+                        
+                        return {
+                            "success": True,
+                            "scan_timestamp": datetime.now().isoformat(),
+                            "scanned_by": {
+                                "user_id": current_user.id,
+                                "email": current_user.email,
+                                "name": f"{current_user.first_name} {current_user.last_name}",
+                                "role": current_user.role,
+                                "location_id": current_user.location_id
+                            },
+                            "classification": {
+                                "confidence_score": best_match.get('similarity_score', 0),
+                                "confidence_percentage": best_match.get('confidence_percentage', 0),
+                                "model_detected": model_name,
+                                "brand_detected": brand
+                            },
+                            "product": enhanced_availability.get('product'),
+                            "local_availability": enhanced_availability.get('local_availability'),
+                            "global_distribution": enhanced_availability.get('global_distribution'),
+                            "formation_opportunities": enhanced_availability.get('formation_opportunities', []),
+                            "suggestions": enhanced_availability.get('suggestions', []),
+                            "all_sizes": [
+                                {
+                                    "size": ps.size,
+                                    "inventory_type": ps.inventory_type,
+                                    "quantity": ps.quantity
+                                }
+                                for ps in product_sizes
+                            ],
+                            "processing_time_ms": round(processing_time, 2)
+                        }
+                
+                # Si no se encuentra en inventario, respuesta básica de clasificación
+                return await self._classification_fallback(current_user, classification_result)
+            
+            # Fallback si microservicio no disponible
+            return await self._classification_fallback(current_user)
+        
+        except Exception as e:
+            logger.error(f"Error en scan_product: {str(e)}")
+            logger.exception(e)
+            raise HTTPException(500, f"Error al procesar escaneo: {str(e)}")

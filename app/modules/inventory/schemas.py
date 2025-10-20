@@ -1,8 +1,31 @@
-from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from pydantic import BaseModel , Field
+from typing import Optional, Dict, Any, List ,Literal
 from decimal import Decimal
 from datetime import datetime
 from app.shared.schemas.common import BaseResponse
+from app.shared.schemas.inventory_distribution import InventoryTypeEnum
+
+
+
+
+class SizeDetail(BaseModel):
+    """Detalle de talla con inventory_type"""
+    size: str
+    quantity: int
+    quantity_exhibition: int = 0
+    
+    # 🆕 NUEVO CAMPO
+    inventory_type: InventoryTypeEnum = InventoryTypeEnum.PAIR
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "size": "42",
+                "quantity": 10,
+                "quantity_exhibition": 2,
+                "inventory_type": "pair"
+            }
+        }
 
 class ProductResponse(BaseResponse):
     product_id: int
@@ -18,7 +41,7 @@ class ProductResponse(BaseResponse):
     unit_price: Decimal
     box_price: Optional[Decimal]
     is_active: int
-    sizes: List[Dict[str, Any]]
+    sizes: List[SizeDetail]
     created_at: datetime
     updated_at: datetime
 
@@ -81,3 +104,303 @@ class SimpleInventoryResponse(BaseModel):
     success: bool
     message: str
     locations: List[SimpleLocationInventory]
+
+class FootAvailability(BaseModel):
+    """Disponibilidad de un tipo de pie"""
+    quantity: int = Field(..., ge=0, description="Cantidad disponible")
+    available: bool = Field(..., description="¿Hay stock disponible?")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "quantity": 3,
+                "available": True
+            }
+        }
+
+
+class IndividualFeetInfo(BaseModel):
+    """Información de pies individuales en una ubicación"""
+    left: FootAvailability
+    right: FootAvailability
+    can_form_pair: bool = Field(..., description="¿Se puede formar un par con los disponibles?")
+    missing: Optional[Literal['left', 'right', 'none']] = Field(
+        None,
+        description="Qué pie falta para formar par"
+    )
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "left": {"quantity": 1, "available": True},
+                "right": {"quantity": 0, "available": False},
+                "can_form_pair": False,
+                "missing": "right"
+            }
+        }
+
+
+class PairAvailability(BaseModel):
+    """Disponibilidad de pares completos"""
+    quantity: int = Field(..., ge=0, description="Cantidad de pares completos")
+    quantity_exhibition: int = Field(0, ge=0, description="Pares en exhibición")
+    quantity_available_sale: int = Field(..., ge=0, description="Pares disponibles para venta")
+    can_sell: bool = Field(..., description="¿Se puede vender ahora?")
+    
+    @property
+    def total_pairs(self) -> int:
+        return self.quantity
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "quantity": 10,
+                "quantity_exhibition": 2,
+                "quantity_available_sale": 8,
+                "can_sell": True
+            }
+        }
+
+
+class LocalAvailability(BaseModel):
+    """Disponibilidad en ubicación actual del vendedor"""
+    location_id: int
+    location_name: str
+    location_type: Literal['local', 'bodega']
+    
+    pairs: PairAvailability
+    individual_feet: IndividualFeetInfo
+    
+    summary: dict = Field(
+        ...,
+        description="Resumen de estado"
+    )
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "location_id": 2,
+                "location_name": "Local Plaza Norte",
+                "location_type": "local",
+                "pairs": {
+                    "quantity": 0,
+                    "quantity_exhibition": 0,
+                    "quantity_available_sale": 0,
+                    "can_sell": False
+                },
+                "individual_feet": {
+                    "left": {"quantity": 1, "available": True},
+                    "right": {"quantity": 0, "available": False},
+                    "can_form_pair": False,
+                    "missing": "right"
+                },
+                "summary": {
+                    "can_sell_now": False,
+                    "reason": "No hay pares completos. Falta pie derecho para formar par.",
+                    "action_required": "Solicitar transferencia o formar par"
+                }
+            }
+        }
+
+
+class LocationInventoryDetail(BaseModel):
+    """Detalle de inventario en una ubicación específica"""
+    location_id: int
+    location_name: str
+    location_type: Literal['local', 'bodega']
+    distance_km: Optional[float] = Field(None, description="Distancia desde ubicación actual")
+    
+    pairs: int = Field(0, ge=0)
+    left_feet: int = Field(0, ge=0)
+    right_feet: int = Field(0, ge=0)
+    
+    can_form_pairs: int = Field(0, ge=0, description="Pares que se pueden formar en esta ubicación")
+    
+    status: str = Field(..., description="Estado del inventario en esta ubicación")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "location_id": 1,
+                "location_name": "Bodega Central",
+                "location_type": "bodega",
+                "distance_km": 10.5,
+                "pairs": 15,
+                "left_feet": 0,
+                "right_feet": 0,
+                "can_form_pairs": 0,
+                "status": "Stock completo disponible"
+            }
+        }
+
+
+class FormationOpportunity(BaseModel):
+    """Oportunidad de formar pares entre ubicaciones"""
+    formable_pairs: int = Field(..., gt=0, description="Cantidad de pares que se pueden formar")
+    
+    from_locations: List[dict] = Field(
+        ...,
+        description="Ubicaciones de origen para los pies"
+    )
+    
+    optimal_destination: dict = Field(
+        ...,
+        description="Ubicación óptima para formar los pares"
+    )
+    
+    estimated_time_hours: float = Field(..., description="Tiempo estimado en horas")
+    priority: Literal['low', 'medium', 'high', 'urgent'] = Field(
+        ...,
+        description="Prioridad de la oportunidad"
+    )
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "formable_pairs": 3,
+                "from_locations": [
+                    {
+                        "location_id": 2,
+                        "location_name": "Local Norte",
+                        "type": "left",
+                        "quantity": 3
+                    },
+                    {
+                        "location_id": 3,
+                        "location_name": "Local Centro",
+                        "type": "right",
+                        "quantity": 3
+                    }
+                ],
+                "optimal_destination": {
+                    "location_id": 2,
+                    "location_name": "Local Norte",
+                    "reason": "Mayor cantidad de izquierdos disponibles"
+                },
+                "estimated_time_hours": 1.5,
+                "priority": "medium"
+            }
+        }
+
+
+class GlobalDistributionResponse(BaseModel):
+    """Respuesta completa de distribución global"""
+    product_id: int
+    reference_code: str
+    brand: str
+    model: str
+    size: str
+    
+    totals: dict = Field(
+        ...,
+        description="Totales globales del producto"
+    )
+    
+    by_location: List[LocationInventoryDetail] = Field(
+        ...,
+        description="Distribución por ubicación"
+    )
+    
+    formation_opportunities: List[FormationOpportunity] = Field(
+        default_factory=list,
+        description="Oportunidades de formar pares"
+    )
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "product_id": 123,
+                "reference_code": "NIKE-AM90-1234",
+                "brand": "Nike",
+                "model": "Air Max 90",
+                "size": "42",
+                "totals": {
+                    "pairs": 15,
+                    "left_feet": 8,
+                    "right_feet": 8,
+                    "formable_pairs": 8,
+                    "total_potential_pairs": 23,
+                    "efficiency_percentage": 65.2
+                },
+                "by_location": [],
+                "formation_opportunities": []
+            }
+        }
+
+
+class ActionSuggestion(BaseModel):
+    """Sugerencia de acción para el vendedor"""
+    priority: Literal['low', 'medium', 'high', 'urgent']
+    type: Literal['transfer_pair', 'form_pair', 'wait', 'restock']
+    action: str = Field(..., description="Descripción de la acción sugerida")
+    estimated_time_minutes: int = Field(..., description="Tiempo estimado en minutos")
+    cost_estimate: Optional[Decimal] = Field(None, description="Costo estimado de la operación")
+    
+    steps: List[str] = Field(
+        default_factory=list,
+        description="Pasos para ejecutar la acción"
+    )
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "priority": "high",
+                "type": "transfer_pair",
+                "action": "Solicitar par completo desde Bodega Central",
+                "estimated_time_minutes": 15,
+                "cost_estimate": 5000,
+                "steps": [
+                    "Crear solicitud de transferencia",
+                    "Bodeguero prepara el par",
+                    "Corredor transporta",
+                    "Recibes en tu local"
+                ]
+            }
+        }
+
+
+class ScanResponseEnhanced(BaseModel):
+    """Respuesta mejorada del scanner con información de pies separados"""
+    success: bool
+    scan_timestamp: str
+    scanned_by: dict
+    
+    # Información del producto
+    product: dict
+    
+    # Disponibilidad local
+    local_availability: LocalAvailability
+    
+    # Distribución global
+    global_distribution: dict
+    
+    # Sugerencias
+    suggestions: List[ActionSuggestion]
+    
+    # Metadata
+    processing_time_ms: float
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "success": True,
+                "scan_timestamp": "2025-01-20T10:30:00",
+                "scanned_by": {
+                    "user_id": 5,
+                    "name": "Carlos Mendoza",
+                    "role": "seller",
+                    "location_id": 2
+                },
+                "product": {
+                    "product_id": 123,
+                    "reference_code": "NIKE-AM90-1234",
+                    "brand": "Nike",
+                    "model": "Air Max 90",
+                    "size": "42"
+                },
+                "local_availability": {},
+                "global_distribution": {},
+                "suggestions": [],
+                "processing_time_ms": 245.5
+            }
+        }

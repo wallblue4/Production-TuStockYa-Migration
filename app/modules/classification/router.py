@@ -35,7 +35,7 @@ async def scan_product(
     - Información de precios
     """
     service = ClassificationService(db, current_company_id)
-    return await service.scan_product(image, current_user, include_transfer_options)
+    return await service.scan_product_distributed(image, current_user, include_transfer_options)
 
 @router.get("/health")
 async def classification_health():

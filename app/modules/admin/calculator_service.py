@@ -234,11 +234,11 @@ class CostCalculatorService:
         multiplier = frequency_multipliers.get(frequency, 1)
         return amount * Decimal(str(multiplier))
     
-    def calculate_operational_dashboard(self, admin_id: int) -> Dict[str, Any]:
+    def calculate_operational_dashboard(self, admin_id: int, company_id: int) -> Dict[str, Any]:
         """Calcular dashboard operativo consolidado"""
         
         # Obtener ubicaciones gestionadas
-        managed_locations = self.repository.get_managed_locations_for_admin(admin_id)
+        managed_locations = self.repository.get_managed_locations_for_admin(admin_id, company_id)
         
         dashboard = {
             "summary": {
