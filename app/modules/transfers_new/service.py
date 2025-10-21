@@ -8,8 +8,18 @@ from sqlalchemy import and_
 import logging
 
 from .repository import TransfersRepository
-from .schemas import TransferRequestCreate, TransferRequestResponse, MyTransferRequestsResponse, ReceptionConfirmation , ReturnRequestCreate , ReturnRequestResponse, ReturnReceptionConfirmation
-from app.shared.database.models import ProductSize, Product, Location ,TransferRequest, ReturnNotification
+from .schemas import (TransferRequestCreate, TransferRequestResponse, MyTransferRequestsResponse
+                        , ReceptionConfirmation , ReturnRequestCreate 
+                        , ReturnRequestResponse, ReturnReceptionConfirmation,  ReturnReceptionConfirmation,
+    SingleFootTransferResponse)
+from app.shared.schemas.inventory_distribution import (
+    SingleFootTransferRequest,
+    PairFormationResult,
+    OppositeFootInfo,
+    InventoryTypeEnum
+)
+
+from app.shared.database.models import Product, Location, TransferRequest ,ReturnNotification
 
 logger = logging.getLogger(__name__)
 
@@ -18,129 +28,457 @@ class TransfersService:
         self.db = db
         self.repository = TransfersRepository(db)
     
+    # async def create_transfer_request(
+    #     self,
+    #     transfer_data: TransferRequestCreate,
+    #     requester_id: int,
+    #     company_id: int
+    # ) -> TransferRequestResponse:
+    #     """Crear solicitud de transferencia con validación de stock"""
+        
+    #     try:
+    #         logger.info(f"📦 Creando transferencia - Usuario: {requester_id}")
+    #         logger.info(f"   Producto: {transfer_data.sneaker_reference_code}")
+    #         logger.info(f"   Talla: {transfer_data.size}")
+    #         logger.info(f"   Cantidad: {transfer_data.quantity}")
+    #         logger.info(f"   Origen ID: {transfer_data.source_location_id}")
+    #         logger.info(f"   Destino ID: {transfer_data.destination_location_id}")
+            
+    #         # ✅ OBTENER NOMBRE REAL DE UBICACIÓN ORIGEN
+    #         source_location = self.db.query(Location).filter(
+    #             Location.id == transfer_data.source_location_id,
+    #             Location.company_id == company_id
+    #         ).first()
+            
+    #         if not source_location:
+    #             logger.error(f"❌ Ubicación origen no encontrada: ID {transfer_data.source_location_id}")
+    #             raise HTTPException(
+    #                 status_code=404,
+    #                 detail=f"Ubicación origen con ID {transfer_data.source_location_id} no existe"
+    #             )
+            
+    #         # ✅ OBTENER NOMBRE REAL DE UBICACIÓN DESTINO
+    #         destination_location = self.db.query(Location).filter(
+    #             Location.id == transfer_data.destination_location_id,
+    #             Location.company_id == company_id
+    #         ).first()
+            
+    #         if not destination_location:
+    #             logger.error(f"❌ Ubicación destino no encontrada: ID {transfer_data.destination_location_id}")
+    #             raise HTTPException(
+    #                 status_code=404,
+    #                 detail=f"Ubicación destino con ID {transfer_data.destination_location_id} no existe"
+    #             )
+            
+    #         logger.info(f"✅ Ubicación origen: '{source_location.name}'")
+    #         logger.info(f"✅ Ubicación destino: '{destination_location.name}'")
+            
+    #         # ✅ VALIDAR STOCK CON NOMBRE REAL + MULTI-TENANT
+    #         product_size = self.db.query(ProductSize).join(Product).filter(
+    #             and_(
+    #                 Product.reference_code == transfer_data.sneaker_reference_code,
+    #                 ProductSize.size == transfer_data.size,
+    #                 ProductSize.location_name == source_location.name,  # ✅ NOMBRE REAL
+    #                 Product.company_id == company_id,  # ✅ MULTI-TENANT
+    #                 ProductSize.company_id == company_id  # ✅ MULTI-TENANT
+    #             )
+    #         ).first()
+            
+    #         # Validar disponibilidad
+    #         if not product_size:
+    #             logger.warning(
+    #                 f"❌ Producto no encontrado: {transfer_data.sneaker_reference_code} "
+    #                 f"talla {transfer_data.size} en '{source_location.name}'"
+    #             )
+    #             raise HTTPException(
+    #                 status_code=404,
+    #                 detail=f"Producto {transfer_data.sneaker_reference_code} talla {transfer_data.size} "
+    #                        f"no existe en '{source_location.name}'"
+    #             )
+            
+    #         if product_size.quantity < transfer_data.quantity:
+    #             logger.warning(
+    #                 f"❌ Stock insuficiente en '{source_location.name}': "
+    #                 f"disponible={product_size.quantity}, solicitado={transfer_data.quantity}"
+    #             )
+    #             raise HTTPException(
+    #                 status_code=400,
+    #                 detail=f"Stock insuficiente en '{source_location.name}'. "
+    #                        f"Disponible: {product_size.quantity}, Solicitado: {transfer_data.quantity}"
+    #             )
+            
+    #         logger.info(f"✅ Stock validado en '{source_location.name}': {product_size.quantity} unidades disponibles")
+            
+    #         # Crear transferencia
+    #         transfer_dict = transfer_data.dict()
+    #         transfer = self.repository.create_transfer_request(transfer_dict, requester_id, company_id)
+            
+    #         logger.info(f"✅ Transferencia creada: ID #{transfer.id}")
+    #         logger.info(f"   Origen: {source_location.name} (ID: {source_location.id})")
+    #         logger.info(f"   Destino: {destination_location.name} (ID: {destination_location.id})")
+            
+    #         # Determinar tiempo estimado y prioridad
+    #         estimated_time = "30 minutos" if transfer_data.purpose == "cliente" else "45 minutos"
+    #         priority = "high" if transfer_data.purpose == "cliente" else "normal"
+            
+    #         # Calcular expiración de reserva (si aplica)
+    #         reservation_expires_at = None
+    #         if transfer_data.purpose == "cliente":
+    #             reservation_expires_at = (datetime.now() + timedelta(minutes=45)).isoformat()
+            
+    #         return TransferRequestResponse(
+    #             success=True,
+    #             message=f"Solicitud creada: {source_location.name} → {destination_location.name}",
+    #             transfer_request_id=transfer.id,
+    #             status=transfer.status,
+    #             estimated_time=estimated_time,
+    #             priority=priority,
+    #             next_steps=[
+    #                 f"Bodeguero de '{source_location.name}' revisará la solicitud",
+    #                 "Se confirmará disponibilidad del producto",
+    #                 "Se asignará corredor para el transporte",
+    #                 f"Producto será entregado en '{destination_location.name}'"
+    #             ],
+    #             reservation_expires_at=reservation_expires_at
+    #         )
+            
+    #     except HTTPException:
+    #         # Re-lanzar HTTPExceptions tal como están
+    #         raise
+    #     except Exception as e:
+    #         # Capturar error completo
+    #         logger.exception("❌ Error inesperado creando transferencia")
+    #         raise HTTPException(
+    #             status_code=500, 
+    #             detail=f"Error creando transferencia: {str(e)}"
+    #         )
+
+
     async def create_transfer_request(
         self,
         transfer_data: TransferRequestCreate,
         requester_id: int,
         company_id: int
     ) -> TransferRequestResponse:
-        """Crear solicitud de transferencia con validación de stock"""
+        """
+        Crear solicitud de transferencia con validación de stock
+        ✅ MEJORADO: Ahora soporta pies individuales
+        """
         
         try:
             logger.info(f"📦 Creando transferencia - Usuario: {requester_id}")
             logger.info(f"   Producto: {transfer_data.sneaker_reference_code}")
             logger.info(f"   Talla: {transfer_data.size}")
             logger.info(f"   Cantidad: {transfer_data.quantity}")
+            logger.info(f"   Tipo Inventario: {transfer_data.inventory_type}")
             logger.info(f"   Origen ID: {transfer_data.source_location_id}")
             logger.info(f"   Destino ID: {transfer_data.destination_location_id}")
             
-            # ✅ OBTENER NOMBRE REAL DE UBICACIÓN ORIGEN
+            # 1. Validar ubicaciones
             source_location = self.db.query(Location).filter(
-                Location.id == transfer_data.source_location_id,
-                Location.company_id == company_id
+                and_(
+                    Location.id == transfer_data.source_location_id,
+                    Location.company_id == company_id
+                )
             ).first()
             
-            if not source_location:
-                logger.error(f"❌ Ubicación origen no encontrada: ID {transfer_data.source_location_id}")
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Ubicación origen con ID {transfer_data.source_location_id} no existe"
-                )
-            
-            # ✅ OBTENER NOMBRE REAL DE UBICACIÓN DESTINO
             destination_location = self.db.query(Location).filter(
-                Location.id == transfer_data.destination_location_id,
-                Location.company_id == company_id
+                and_(
+                    Location.id == transfer_data.destination_location_id,
+                    Location.company_id == company_id
+                )
             ).first()
             
-            if not destination_location:
-                logger.error(f"❌ Ubicación destino no encontrada: ID {transfer_data.destination_location_id}")
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Ubicación destino con ID {transfer_data.destination_location_id} no existe"
-                )
+            if not source_location or not destination_location:
+                raise HTTPException(status_code=404, detail="Ubicación no encontrada")
             
-            logger.info(f"✅ Ubicación origen: '{source_location.name}'")
-            logger.info(f"✅ Ubicación destino: '{destination_location.name}'")
+            logger.info(f"   ✅ Ubicaciones validadas: {source_location.name} → {destination_location.name}")
             
-            # ✅ VALIDAR STOCK CON NOMBRE REAL + MULTI-TENANT
-            product_size = self.db.query(ProductSize).join(Product).filter(
+            # 2. Buscar producto
+            product = self.db.query(Product).filter(
                 and_(
                     Product.reference_code == transfer_data.sneaker_reference_code,
-                    ProductSize.size == transfer_data.size,
-                    ProductSize.location_name == source_location.name,  # ✅ NOMBRE REAL
-                    Product.company_id == company_id,  # ✅ MULTI-TENANT
-                    ProductSize.company_id == company_id  # ✅ MULTI-TENANT
+                    Product.company_id == company_id
                 )
             ).first()
             
-            # Validar disponibilidad
-            if not product_size:
-                logger.warning(
-                    f"❌ Producto no encontrado: {transfer_data.sneaker_reference_code} "
-                    f"talla {transfer_data.size} en '{source_location.name}'"
-                )
+            if not product:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"Producto {transfer_data.sneaker_reference_code} talla {transfer_data.size} "
-                           f"no existe en '{source_location.name}'"
+                    detail=f"Producto {transfer_data.sneaker_reference_code} no encontrado"
                 )
             
-            if product_size.quantity < transfer_data.quantity:
-                logger.warning(
-                    f"❌ Stock insuficiente en '{source_location.name}': "
-                    f"disponible={product_size.quantity}, solicitado={transfer_data.quantity}"
+            logger.info(f"   ✅ Producto encontrado: {product.brand} {product.model}")
+            
+            # 3. ✅ VALIDAR DISPONIBILIDAD POR TIPO DE INVENTARIO
+            if transfer_data.inventory_type != InventoryTypeEnum.PAIR:
+                # Es un pie individual - validar disponibilidad específica
+                validation = self.repository.validate_single_foot_availability(
+                    product_id=product.id,
+                    size=transfer_data.size,
+                    inventory_type=transfer_data.inventory_type,
+                    location_name=source_location.name,
+                    quantity=transfer_data.quantity,
+                    company_id=company_id
                 )
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Stock insuficiente en '{source_location.name}'. "
-                           f"Disponible: {product_size.quantity}, Solicitado: {transfer_data.quantity}"
+                
+                if not validation['can_fulfill']:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Stock insuficiente de pie {transfer_data.inventory_type}. "
+                            f"Disponible: {validation['current_stock']}, "
+                            f"Solicitado: {transfer_data.quantity}"
+                        )
+                    )
+                
+                logger.info(f"   ✅ Disponibilidad validada: {validation['current_stock']} {transfer_data.inventory_type}")
+            else:
+                # Es un par completo - validación normal
+                product_size = self.db.query(ProductSize).filter(
+                    and_(
+                        ProductSize.product_id == product.id,
+                        ProductSize.size == transfer_data.size,
+                        ProductSize.location_name == source_location.name,
+                        ProductSize.inventory_type == 'pair',
+                        ProductSize.company_id == company_id
+                    )
+                ).first()
+                
+                if not product_size or product_size.quantity < transfer_data.quantity:
+                    available = product_size.quantity if product_size else 0
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Stock insuficiente. Disponible: {available}, Solicitado: {transfer_data.quantity}"
+                    )
+                
+                logger.info(f"   ✅ Disponibilidad validada: {product_size.quantity} pares")
+            
+            # 4. ✅ BUSCAR PIE OPUESTO EN DESTINO (si es pie individual)
+            opposite_foot_info = None
+            pair_formation_potential = {
+                "opposite_foot_available": False,
+                "can_form_pairs": False,
+                "quantity_formable": 0
+            }
+            
+            if transfer_data.inventory_type in [InventoryTypeEnum.LEFT_ONLY, InventoryTypeEnum.RIGHT_ONLY]:
+                opposite_foot_info = self.repository.find_opposite_foot_in_location(
+                    reference_code=transfer_data.sneaker_reference_code,
+                    size=transfer_data.size,
+                    location_id=transfer_data.destination_location_id,
+                    received_inventory_type=transfer_data.inventory_type,
+                    company_id=company_id
                 )
+                
+                if opposite_foot_info and opposite_foot_info.get("exits"):
+                    pair_formation_potential = {
+                        "opposite_foot_available": True,
+                        "can_form_pairs": True,
+                        "quantity_formable": min(transfer_data.quantity, opposite_foot_info.quantity)
+                    }
+                    logger.info(f"   🎉 Pie opuesto disponible en destino! Se pueden formar {pair_formation_potential['quantity_formable']} par(es)")
             
-            logger.info(f"✅ Stock validado en '{source_location.name}': {product_size.quantity} unidades disponibles")
+            # 5. Determinar prioridad
+            priority = self._calculate_priority(transfer_data.purpose)
             
-            # Crear transferencia
-            transfer_dict = transfer_data.dict()
-            transfer = self.repository.create_transfer_request(transfer_dict, requester_id, company_id)
+            # 6. Crear transferencia
+            transfer_dict = {
+                "source_location_id": transfer_data.source_location_id,
+                "destination_location_id": transfer_data.destination_location_id,
+                "sneaker_reference_code": transfer_data.sneaker_reference_code,
+                "brand": transfer_data.brand,
+                "model": transfer_data.model,
+                "size": transfer_data.size,
+                "quantity": transfer_data.quantity,
+                "purpose": transfer_data.purpose,
+                "pickup_type": transfer_data.pickup_type,
+                "destination_type": transfer_data.destination_type,
+                "notes": transfer_data.notes,
+                "inventory_type": transfer_data.inventory_type  # ✅ NUEVO
+            }
             
-            logger.info(f"✅ Transferencia creada: ID #{transfer.id}")
-            logger.info(f"   Origen: {source_location.name} (ID: {source_location.id})")
-            logger.info(f"   Destino: {destination_location.name} (ID: {destination_location.id})")
+            new_transfer = self.repository.create_transfer_request(
+                transfer_dict, 
+                requester_id, 
+                company_id
+            )
             
-            # Determinar tiempo estimado y prioridad
-            estimated_time = "30 minutos" if transfer_data.purpose == "cliente" else "45 minutos"
-            priority = "high" if transfer_data.purpose == "cliente" else "normal"
+            logger.info(f"   ✅ Transferencia creada - ID: {new_transfer.id}")
             
-            # Calcular expiración de reserva (si aplica)
-            reservation_expires_at = None
-            if transfer_data.purpose == "cliente":
-                reservation_expires_at = (datetime.now() + timedelta(minutes=45)).isoformat()
+            # 7. Generar próximos pasos
+            next_steps = self._generate_next_steps(new_transfer, source_location.type)
             
+            # 8. Retornar respuesta
             return TransferRequestResponse(
                 success=True,
-                message=f"Solicitud creada: {source_location.name} → {destination_location.name}",
-                transfer_request_id=transfer.id,
-                status=transfer.status,
-                estimated_time=estimated_time,
+                message="Solicitud de transferencia creada exitosamente",
+                transfer_request_id=new_transfer.id,
+                status=new_transfer.status,
+                estimated_time=self._estimate_delivery_time(source_location.type, destination_location.type),
                 priority=priority,
-                next_steps=[
-                    f"Bodeguero de '{source_location.name}' revisará la solicitud",
-                    "Se confirmará disponibilidad del producto",
-                    "Se asignará corredor para el transporte",
-                    f"Producto será entregado en '{destination_location.name}'"
-                ],
-                reservation_expires_at=reservation_expires_at
+                next_steps=next_steps,
+                inventory_type=transfer_data.inventory_type,
+                opposite_foot_info=opposite_foot_info,
+                pair_formation_potential=pair_formation_potential
             )
             
         except HTTPException:
-            # Re-lanzar HTTPExceptions tal como están
             raise
         except Exception as e:
-            # Capturar error completo
-            logger.exception("❌ Error inesperado creando transferencia")
+            logger.exception("❌ Error creando transferencia")
             raise HTTPException(
-                status_code=500, 
+                status_code=500,
                 detail=f"Error creando transferencia: {str(e)}"
+            )
+
+
+    async def create_single_foot_transfer(
+        self,
+        request: SingleFootTransferRequest,
+        user_id: int,
+        company_id: int
+    ) -> SingleFootTransferResponse:
+        """
+        🆕 Crear transferencia de un pie individual
+        ✅ CORRECCIÓN: Mapear foot_side correctamente a inventory_type
+        """
+        
+        try:
+            logger.info(f"👟 Creando transferencia de pie individual")
+            logger.info(f"   Lado: {request.foot_side}")
+            logger.info(f"   Producto: {request.sneaker_reference_code}")
+            logger.info(f"   Talla: {request.size}")
+            logger.info(f"   Cantidad: {request.quantity}")
+            
+            # ✅ MAPEAR CORRECTAMENTE foot_side → inventory_type
+            inventory_type = 'left_only' if request.foot_side == 'left' else 'right_only'
+            logger.info(f"   ✅ Inventory type: {inventory_type}")
+            
+            # 1. Buscar producto
+            product = self.db.query(Product).filter(
+                and_(
+                    Product.reference_code == request.sneaker_reference_code,
+                    Product.company_id == company_id
+                )
+            ).first()
+            
+            if not product:
+                raise HTTPException(404, "Producto no encontrado")
+            
+            # 2. Buscar ubicaciones
+            source_location = self.db.query(Location).filter(
+                and_(
+                    Location.id == request.source_location_id,
+                    Location.company_id == company_id
+                )
+            ).first()
+            
+            destination_location = self.db.query(Location).filter(
+                and_(
+                    Location.id == request.destination_location_id,
+                    Location.company_id == company_id
+                )
+            ).first()
+            
+            if not source_location or not destination_location:
+                raise HTTPException(404, "Ubicación no encontrada")
+            
+            # 3. Validar disponibilidad del pie específico
+            validation = self.repository.validate_single_foot_availability(
+                product_id=product.id,
+                size=request.size,
+                inventory_type=inventory_type,  # ✅ Usar inventory_type correcto
+                location_name=source_location.name,
+                quantity=request.quantity,
+                company_id=company_id
+            )
+            
+            if not validation['can_fulfill']:
+                raise HTTPException(
+                    400,
+                    f"Stock insuficiente. Disponible: {validation['current_stock']} pie(s) {request.foot_side}"
+                )
+            
+            logger.info(f"   ✅ Stock disponible: {validation['current_stock']}")
+            
+            # 4. Buscar pie opuesto en destino
+            opposite_foot_info = self.repository.find_opposite_foot_in_location(
+                reference_code=request.sneaker_reference_code,
+                size=request.size,
+                location_id=request.destination_location_id,
+                received_inventory_type=inventory_type,  # ✅ Usar inventory_type correcto
+                company_id=company_id
+            )
+            
+            can_auto_form = False
+            quantity_formable = 0
+            
+            # Acceder como diccionario
+            if opposite_foot_info and opposite_foot_info.get('exists'):
+                can_auto_form = True
+                quantity_formable = min(request.quantity, opposite_foot_info.get('quantity', 0))
+                logger.info(f"   🎉 Pie opuesto encontrado! Se pueden formar {quantity_formable} par(es)")
+            else:
+                logger.info(f"   ℹ️ No hay pie opuesto en destino - no se formará par automáticamente")
+            
+            # 5. Crear transferencia usando el método base
+            transfer_data = TransferRequestCreate(
+                source_location_id=request.source_location_id,
+                destination_location_id=request.destination_location_id,
+                sneaker_reference_code=request.sneaker_reference_code,
+                brand=product.brand,
+                model=product.model,
+                size=request.size,
+                quantity=request.quantity,
+                purpose=request.purpose,
+                pickup_type=request.pickup_type,
+                destination_type='bodega',
+                notes=request.notes,
+                inventory_type=inventory_type  # ✅ CRÍTICO: Pasar inventory_type correcto
+            )
+            
+            logger.info(f"   📦 Creando TransferRequest con inventory_type='{inventory_type}'")
+            
+            base_response = await self.create_transfer_request(
+                transfer_data,
+                user_id,
+                company_id
+            )
+            
+            # 6. Construir respuesta especializada
+            next_steps = [
+                "1. Bodega procesará la solicitud",
+                "2. Se notificará cuando esté listo para recoger"
+            ]
+            
+            if can_auto_form:
+                next_steps.append(
+                    f"3. ¡BONUS! Al recibir, se formará automáticamente {quantity_formable} par(es) con el pie opuesto disponible"
+                )
+            
+            logger.info(f"   ✅ Transferencia creada exitosamente - ID: {base_response.transfer_request_id}")
+            
+            return SingleFootTransferResponse(
+                success=True,
+                message=f"Transferencia de pie {request.foot_side} creada exitosamente",
+                transfer_request_id=base_response.transfer_request_id,
+                inventory_type=inventory_type,  # ✅ Retornar el correcto
+                foot_side=request.foot_side,
+                opposite_foot_available=opposite_foot_info is not None and opposite_foot_info.get('exists', False),
+                can_auto_form_pair=can_auto_form,
+                quantity_formable=quantity_formable,
+                status="pending",
+                next_steps=next_steps
+            )
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception(f"❌ Error creando transferencia de pie individual: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error: {str(e)}"
             )
     
     async def confirm_reception(
@@ -419,3 +757,35 @@ class TransfersService:
                 "vendor_id": vendor_id
             }
         }
+    
+    def _calculate_priority(self, purpose: str) -> str:
+        """Calcular prioridad basada en propósito"""
+        if purpose == "cliente":
+            return "alta"
+        elif purpose == "exhibition":
+            return "media"
+        else:
+            return "normal"
+    
+    def _estimate_delivery_time(self, source_type: str, destination_type: str) -> str:
+        """Estimar tiempo de entrega"""
+        if source_type == "bodega" and destination_type == "local":
+            return "30-45 minutos"
+        elif source_type == "local" and destination_type == "bodega":
+            return "20-30 minutos"
+        else:
+            return "45-60 minutos"
+    
+    def _generate_next_steps(self, transfer: TransferRequest, source_type: str) -> list:
+        """Generar próximos pasos según el flujo"""
+        if source_type == "bodega":
+            return [
+                "1. Bodeguero procesará la solicitud",
+                "2. Se notificará cuando esté listo",
+                "3. Corredor/Vendedor recogerá el producto"
+            ]
+        else:
+            return [
+                "1. Esperando que el vendedor prepare el producto",
+                "2. Corredor recogerá y entregará"
+            ]

@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 from .repository import ClassificationRepository
 from .schemas import ProductMatch
 from app.modules.inventory.service import InventoryService
+import logging
 
+logger = logging.getLogger(__name__)
 
 class ClassificationService:
     def __init__(self, db: Session, company_id: int):
@@ -340,16 +342,15 @@ class ClassificationService:
         first_word = model_name.split()[0] if model_name.split() else 'Unknown'
         return first_word.capitalize()
 
-    async def scan_product(
+    async def scan_product_distributed(
         self, 
         image: UploadFile, 
         current_user: Any, 
         include_transfer_options: bool = True
     ) -> Dict[str, Any]:
         """
-        Procesar escaneo de producto con IA
-        
-        ACTUALIZADO: Ahora incluye información de pies separados
+        Procesar escaneo de producto con IA incluyendo pies separados
+        ✅ MEJORADO: Retorna información DETALLADA de TODAS las tallas
         """
         start_time = datetime.now()
         
@@ -377,26 +378,47 @@ class ClassificationService:
                 if local_products:
                     product = local_products[0]
                     
-                    # 🆕 USAR SERVICIO DE INVENTARIO MEJORADO
-                    inventory_service = InventoryService(self.db, self.company_id)
-                    
-                    # Obtener disponibilidad mejorada
-                    # Asumir que queremos la primera talla disponible
+                    # 🆕 OBTENER TODAS LAS TALLAS CON DISTRIBUCIÓN
                     product_sizes = self.repository.get_product_sizes(product['id'], self.company_id)
                     
                     if product_sizes:
-                        # Tomar primera talla como ejemplo (en producción, el vendedor podría seleccionar)
-                        first_size = product_sizes[0].size
+                        # ✅ OBTENER TALLAS ÚNICAS
+                        unique_sizes = sorted(list(set(ps['size'] for ps in product_sizes)))
                         
-                        enhanced_availability = await inventory_service.get_enhanced_availability(
-                            reference_code=product['reference_code'],
-                            size=first_size,
-                            user_location_id=current_user.location_id,
-                            user_id=current_user.id
-                        )
+                        logger.info(f"📊 Procesando {len(unique_sizes)} tallas: {unique_sizes}")
+                        
+                        # ✅ OBTENER DISPONIBILIDAD DETALLADA DE CADA TALLA
+                        inventory_service = InventoryService(self.db, self.company_id)
+                        sizes_detailed = {}
+                        
+                        for size in unique_sizes:
+                            logger.info(f"   🔍 Procesando talla {size}...")
+                            
+                            try:
+                                size_info = await inventory_service.get_enhanced_availability(
+                                    reference_code=product['reference_code'],
+                                    size=size,
+                                    user_location_id=current_user.location_id,
+                                    user_id=current_user.id
+                                )
+                                sizes_detailed[size] = size_info
+                                logger.info(f"   ✅ Talla {size} procesada")
+                            except Exception as e:
+                                logger.error(f"   ❌ Error procesando talla {size}: {str(e)}")
+                                # Continuar con otras tallas si una falla
+                                sizes_detailed[size] = {
+                                    "error": str(e),
+                                    "size": size
+                                }
+                        
+                        # ✅ CALCULAR RESUMEN GLOBAL (TODAS LAS TALLAS)
+                        global_summary = self._calculate_global_summary(sizes_detailed, current_user.location_id)
                         
                         processing_time = (datetime.now() - start_time).total_seconds() * 1000
                         
+                        logger.info(f"✅ Scan completado en {processing_time:.2f}ms")
+                        
+                        # ✅ RESPUESTA COMPLETA CON TODAS LAS TALLAS
                         return {
                             "success": True,
                             "scan_timestamp": datetime.now().isoformat(),
@@ -411,31 +433,170 @@ class ClassificationService:
                                 "confidence_score": best_match.get('similarity_score', 0),
                                 "confidence_percentage": best_match.get('confidence_percentage', 0),
                                 "model_detected": model_name,
-                                "brand_detected": brand
+                                "brand_detected": brand,
+                                "classification_source": "microservice_ai"
                             },
-                            "product": enhanced_availability.get('product'),
-                            "local_availability": enhanced_availability.get('local_availability'),
-                            "global_distribution": enhanced_availability.get('global_distribution'),
-                            "formation_opportunities": enhanced_availability.get('formation_opportunities', []),
-                            "suggestions": enhanced_availability.get('suggestions', []),
-                            "all_sizes": [
-                                {
-                                    "size": ps.size,
-                                    "inventory_type": ps.inventory_type,
-                                    "quantity": ps.quantity
-                                }
-                                for ps in product_sizes
-                            ],
+                            "product": {
+                                "product_id": product['id'],
+                                "reference_code": product['reference_code'],
+                                "brand": product['brand'],
+                                "model": product['model'],
+                                "description": product.get('description'),
+                                "unit_price": product['unit_price'],
+                                "box_price": product.get('box_price'),
+                                "image_url": product.get('image_url')
+                            },
+                            
+                            # ✅ INFORMACIÓN DETALLADA POR TALLA
+                            "sizes": {
+                                "available_sizes": unique_sizes,
+                                "total_sizes": len(unique_sizes),
+                                "detailed_by_size": sizes_detailed
+                            },
+                            
+                            # ✅ RESUMEN GLOBAL (TODAS LAS TALLAS COMBINADAS)
+                            "global_summary": global_summary,
+                            
+                            # ✅ DISTRIBUCIÓN COMPLETA (Para referencia rápida)
+                            "distribution_matrix": product_sizes,
+                            
                             "processing_time_ms": round(processing_time, 2)
                         }
-                
-                # Si no se encuentra en inventario, respuesta básica de clasificación
-                return await self._classification_fallback(current_user, classification_result)
             
-            # Fallback si microservicio no disponible
+            # Fallback si no se encuentra o microservicio no disponible
             return await self._classification_fallback(current_user)
         
         except Exception as e:
             logger.error(f"Error en scan_product: {str(e)}")
             logger.exception(e)
             raise HTTPException(500, f"Error al procesar escaneo: {str(e)}")
+
+
+    # ✅ NUEVO MÉTODO: Calcular resumen global
+    def _calculate_global_summary(
+        self, 
+        sizes_detailed: Dict[str, Any],
+        user_location_id: int
+    ) -> Dict[str, Any]:
+        """
+        Calcular resumen global combinando todas las tallas
+        
+        Args:
+            sizes_detailed: Dict con información detallada de cada talla
+            user_location_id: ID de ubicación del usuario
+        
+        Returns:
+            Dict con resumen global combinado
+        """
+        
+        # Inicializar contadores globales
+        global_totals = {
+            "pairs": 0,
+            "left_feet": 0,
+            "right_feet": 0,
+            "formable_pairs": 0
+        }
+        
+        local_totals = {
+            "pairs": 0,
+            "left_feet": 0,
+            "right_feet": 0,
+            "can_sell_pairs": 0
+        }
+        
+        all_opportunities = []
+        all_suggestions = []
+        sizes_with_stock = []
+        sizes_can_sell_now = []
+        
+        # Procesar cada talla
+        for size, size_data in sizes_detailed.items():
+            if 'error' in size_data:
+                continue
+            
+            # Acumular totales globales
+            if 'global_distribution' in size_data:
+                dist = size_data['global_distribution']
+                if 'totals' in dist:
+                    totals = dist['totals']
+                    global_totals['pairs'] += totals.get('pairs', 0)
+                    global_totals['left_feet'] += totals.get('left_feet', 0)
+                    global_totals['right_feet'] += totals.get('right_feet', 0)
+                    global_totals['formable_pairs'] += totals.get('formable_pairs', 0)
+            
+            # Acumular disponibilidad local
+            if 'local_availability' in size_data:
+                local = size_data['local_availability']
+                
+                if 'pairs' in local and isinstance(local['pairs'], dict):
+                    pairs_qty = local['pairs'].get('quantity', 0)
+                    local_totals['pairs'] += pairs_qty
+                    
+                    if local['pairs'].get('can_sell', False):
+                        local_totals['can_sell_pairs'] += pairs_qty
+                        sizes_can_sell_now.append(size)
+                
+                if 'individual_feet' in local:
+                    feet = local['individual_feet']
+                    local_totals['left_feet'] += feet.get('left', {}).get('quantity', 0)
+                    local_totals['right_feet'] += feet.get('right', {}).get('quantity', 0)
+            
+            # Recopilar oportunidades
+            if 'formation_opportunities' in size_data:
+                for opp in size_data['formation_opportunities']:
+                    opp['size'] = size  # Agregar info de talla
+                    all_opportunities.append(opp)
+            
+            # Recopilar sugerencias
+            if 'suggestions' in size_data:
+                for sugg in size_data['suggestions']:
+                    if isinstance(sugg, dict):
+                        sugg['size'] = size  # Agregar info de talla
+                        all_suggestions.append(sugg)
+            
+            # Tallas con stock
+            if global_totals['pairs'] > 0 or global_totals['left_feet'] > 0 or global_totals['right_feet'] > 0:
+                sizes_with_stock.append(size)
+        
+        # Calcular eficiencia global
+        total_potential_pairs = global_totals['pairs'] + global_totals['formable_pairs']
+        efficiency = round((global_totals['pairs'] / total_potential_pairs * 100), 2) if total_potential_pairs > 0 else 100.0
+        
+        # Ordenar oportunidades por prioridad
+        priority_order = {"high": 0, "medium": 1, "low": 2}
+        all_opportunities.sort(key=lambda x: priority_order.get(x.get('priority', 'low'), 3))
+        
+        # Ordenar sugerencias por prioridad
+        all_suggestions.sort(key=lambda x: priority_order.get(x.get('priority', 'low'), 3))
+        
+        return {
+            "inventory_global": {
+                "total_pairs": global_totals['pairs'],
+                "total_left_feet": global_totals['left_feet'],
+                "total_right_feet": global_totals['right_feet'],
+                "formable_pairs": global_totals['formable_pairs'],
+                "total_potential_pairs": total_potential_pairs,
+                "efficiency_percentage": efficiency,
+                "total_shoes": (global_totals['pairs'] * 2) + global_totals['left_feet'] + global_totals['right_feet']
+            },
+            
+            "inventory_local": {
+                "pairs_available": local_totals['pairs'],
+                "pairs_can_sell": local_totals['can_sell_pairs'],
+                "left_feet": local_totals['left_feet'],
+                "right_feet": local_totals['right_feet'],
+                "can_sell_immediately": local_totals['can_sell_pairs'] > 0
+            },
+            
+            "sizes_summary": {
+                "sizes_with_stock": sizes_with_stock,
+                "sizes_can_sell_now": sizes_can_sell_now,
+                "total_sizes_available": len(sizes_with_stock)
+            },
+            
+            "all_formation_opportunities": all_opportunities,
+            "total_opportunities": len(all_opportunities),
+            
+            "all_suggestions": all_suggestions[:10],  # Top 10 sugerencias
+            "total_suggestions": len(all_suggestions)
+        }

@@ -2,7 +2,7 @@
 
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, text, desc, func ,case
+from sqlalchemy import and_, text, desc, func ,case ,or_
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from datetime import datetime, date
 import logging
@@ -22,16 +22,21 @@ class WarehouseRepository:
         self.db = db
         logger.info("✅ WarehouseRepository inicializado")
     
+    
+        
+
     def get_pending_requests_for_warehouse(self, warehouse_keeper_id: int, company_id: int) -> List[Dict[str, Any]]:
         """
-        BG001: Obtener solicitudes pendientes para bodeguero - FILTRADO POR COMPANY_ID
-        
-        Retorna transferencias en estado 'pending' para ubicaciones
-        que el bodeguero puede gestionar. 
-        
-        *Ajustado para que las devoluciones (return) muestren las solicitudes
-        cuya ubicación de destino es gestionada por el bodeguero.*
+        BG001: Obtener solicitudes pendientes para bodeguero
+        ✅ CON ROLLBACK PREVENTIVO
         """
+        
+        # ✅ CRÍTICO: Rollback al inicio para limpiar cualquier transacción fallida
+        try:
+            self.db.rollback()
+        except:
+            pass
+        
         try:
             logger.info(f"📋 Buscando solicitudes pendientes para bodeguero {warehouse_keeper_id}")
             
@@ -45,112 +50,130 @@ class WarehouseRepository:
             
             logger.info(f"✅ Ubicaciones gestionadas: {location_ids}")
             
-            # Query compleja para obtener todas las solicitudes pendientes
-            query = text("""
-                SELECT 
-                    tr.*,
-                    sl.name as source_location_name,
-                    sl.address as source_address,
-                    dl.name as destination_location_name,
-                    dl.address as destination_address,
-                    r.first_name as requester_first_name,
-                    r.last_name as requester_last_name,
-                    r.email as requester_email,
-                    p.image_url as product_image,
-                    p.unit_price,
-                    p.box_price,
-                    ps.quantity as stock_available,
-                    CASE 
-                        WHEN tr.original_transfer_id IS NOT NULL THEN 'return'
-                        ELSE 'transfer'
-                    END as request_type,
-                    CASE 
-                        WHEN tr.original_transfer_id IS NOT NULL THEN 'DEVOLUCIÓN'
-                        ELSE 'TRANSFERENCIA'
-                    END as request_display_type
-                FROM transfer_requests tr
-                JOIN locations sl ON tr.source_location_id = sl.id
-                JOIN locations dl ON tr.destination_location_id = dl.id
-                JOIN users r ON tr.requester_id = r.id
-                LEFT JOIN products p ON tr.sneaker_reference_code = p.reference_code
-                LEFT JOIN product_sizes ps ON (
-                    ps.product_id = p.id 
-                    AND ps.size = tr.size 
-                    AND ps.location_name = sl.name
+            # Query usando ORM
+            from sqlalchemy import case, func, or_
+            
+            query = self.db.query(
+                TransferRequest,
+                User.first_name.label('requester_first_name'),
+                User.last_name.label('requester_last_name'),
+                User.email.label('requester_email'),
+                Location.name.label('source_location_name'),
+                Location.address.label('source_address'),
+                func.coalesce(Product.image_url, '').label('product_image'),
+                func.coalesce(Product.unit_price, 0).label('unit_price'),
+                func.coalesce(Product.box_price, 0).label('box_price'),
+                func.coalesce(ProductSize.quantity, 0).label('stock_available')
+            ).join(
+                User, TransferRequest.requester_id == User.id
+            ).join(
+                Location, TransferRequest.source_location_id == Location.id
+            ).outerjoin(
+                Product, 
+                and_(
+                    Product.reference_code == TransferRequest.sneaker_reference_code,
+                    Product.company_id == TransferRequest.company_id
                 )
-                WHERE tr.status = 'pending'
-                AND tr.company_id = :company_id
-                AND sl.company_id = :company_id
-                AND dl.company_id = :company_id
-                AND (
-                    -- Lógica para TRANSFERENCIAS (el bodeguero gestiona la ubicación de ORIGEN)
-                    (tr.original_transfer_id IS NULL AND tr.source_location_id = ANY(:location_ids))
-                    -- Lógica para DEVOLUCIONES (el bodeguero gestiona la ubicación de DESTINO)
-                    OR (tr.original_transfer_id IS NOT NULL AND tr.destination_location_id = ANY(:location_ids))
+            ).outerjoin(
+                ProductSize,
+                and_(
+                    ProductSize.product_id == Product.id,
+                    ProductSize.size == TransferRequest.size,
+                    ProductSize.location_name == Location.name,
+                    ProductSize.inventory_type == TransferRequest.inventory_type.cast(ProductSize.inventory_type.type),
+                    ProductSize.company_id == TransferRequest.company_id
                 )
-                ORDER BY 
-                    CASE WHEN tr.purpose = 'cliente' THEN 1 ELSE 2 END,
-                    tr.requested_at ASC
-            """)
+            ).filter(
+                TransferRequest.status == 'pending',
+                TransferRequest.company_id == company_id,
+                or_(
+                    and_(
+                        TransferRequest.request_type == 'transfer',
+                        TransferRequest.source_location_id.in_(location_ids)
+                    ),
+                    and_(
+                        TransferRequest.request_type == 'return',
+                        TransferRequest.destination_location_id.in_(location_ids)
+                    )
+                )
+            ).order_by(
+                case(
+                    (TransferRequest.purpose == 'cliente', 1),
+                    (TransferRequest.request_type == 'return', 2),
+                    else_=3
+                ),
+                TransferRequest.requested_at.asc()
+            )
             
-            results = self.db.execute(query, {"location_ids": location_ids, "company_id": company_id}).fetchall()
+            results = query.all()
             
-            logger.info(f"✅ {len(results)} solicitudes pendientes encontradas")
+            logger.info(f"✅ Query ejecutado, {len(results)} resultados encontrados")
             
-            # Procesar resultados (El resto del código se mantiene igual ya que el cambio es solo en la consulta)
+            # Formatear resultados
             requests = []
             for row in results:
+                tr = row.TransferRequest
+                
+                # Calcular prioridad
+                urgent_action = tr.purpose == 'cliente' or tr.request_type == 'return'
+                priority_level = 'alta' if urgent_action else 'normal'
+                
                 # Calcular tiempo transcurrido
-                requested_at = row.requested_at
-                if isinstance(requested_at, str):
-                    requested_at = datetime.fromisoformat(requested_at.replace('Z', '+00:00'))
+                time_elapsed = datetime.now() - tr.requested_at
+                hours = int(time_elapsed.total_seconds() // 3600)
+                minutes = int((time_elapsed.total_seconds() % 3600) // 60)
+                time_elapsed_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
                 
-                time_diff = datetime.now() - requested_at
-                hours = int(time_diff.total_seconds() // 3600)
-                minutes = int((time_diff.total_seconds() % 3600) // 60)
-                time_elapsed = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+                # Determinar qué preparar
+                inventory_type_label = {
+                    'pair': '👟👟 Par completo',
+                    'left_only': '👟← Pie IZQUIERDO',
+                    'right_only': '👟→ Pie DERECHO'
+                }.get(tr.inventory_type or 'pair', '❓ Desconocido')
                 
-                # Determinar si requiere acción urgente
-                urgent_action = row.purpose == 'cliente' or hours >= 2
-                
-                # Determinar nivel de prioridad
-                if row.purpose == 'cliente':
-                    priority_level = 'URGENT'
-                elif hours >= 2:
-                    priority_level = 'HIGH'
-                elif hours >= 1:
-                    priority_level = 'MEDIUM'
+                # Instrucción de preparación
+                if tr.inventory_type == 'pair' or not tr.inventory_type:
+                    preparation_instruction = f"✅ Preparar {tr.quantity} par(es) completo(s) de {tr.brand} {tr.model} talla {tr.size}"
+                elif tr.inventory_type == 'left_only':
+                    preparation_instruction = f"👟← Preparar {tr.quantity} pie(s) IZQUIERDO(S) de {tr.brand} {tr.model} talla {tr.size}"
+                elif tr.inventory_type == 'right_only':
+                    preparation_instruction = f"👟→ Preparar {tr.quantity} pie(s) DERECHO(S) de {tr.brand} {tr.model} talla {tr.size}"
                 else:
-                    priority_level = 'NORMAL'
+                    preparation_instruction = f"⚠️ Preparar {tr.quantity} unidad(es) de {tr.brand} {tr.model} talla {tr.size}"
                 
-                # Imagen del producto
-                product_image = row.product_image
-                if not product_image:
-                    product_image = f"https://via.placeholder.com/300x200?text={row.brand}+{row.model}"
+                # Obtener ubicación destino
+                dest_location = self.db.query(Location).filter(
+                    Location.id == tr.destination_location_id
+                ).first()
                 
                 requests.append({
-                    'id': row.id,
-                    'status': row.status,
-                    'request_type': row.request_type,
-                    'request_display_type': row.request_display_type,
-                    'sneaker_reference_code': row.sneaker_reference_code,
-                    'brand': row.brand,
-                    'model': row.model,
-                    'size': row.size,
-                    'quantity': row.quantity,
-                    'purpose': row.purpose,
-                    'pickup_type': row.pickup_type,
-                    'destination_type': row.destination_type or 'bodega',
-                    'requested_at': requested_at.isoformat(),
-                    'time_elapsed': time_elapsed,
+                    'id': tr.id,
+                    'status': tr.status,
+                    'request_type': tr.request_type,
+                    'sneaker_reference_code': tr.sneaker_reference_code,
+                    'brand': tr.brand,
+                    'model': tr.model,
+                    'size': tr.size,
+                    'quantity': tr.quantity,
+                    
+                    # Información de tipo de inventario
+                    'inventory_type': tr.inventory_type or 'pair',
+                    'inventory_type_label': inventory_type_label,
+                    'preparation_instruction': preparation_instruction,
+                    
+                    'purpose': tr.purpose,
+                    'pickup_type': tr.pickup_type,
                     'urgent_action': urgent_action,
                     'priority_level': priority_level,
+                    'time_elapsed': time_elapsed_str,
+                    'requested_at': tr.requested_at.isoformat(),
+                    
                     'product_info': {
-                        'image': product_image,
-                        'unit_price': float(row.unit_price) if row.unit_price else 0,
-                        'box_price': float(row.box_price) if row.box_price else 0,
-                        'stock_available': row.stock_available or 0,
-                        'description': f"{row.brand} {row.model} - Talla {row.size}"
+                        'image_url': row.product_image,
+                        'unit_price': float(row.unit_price),
+                        'box_price': float(row.box_price),
+                        'stock_available': row.stock_available,
+                        'description': f"{tr.brand} {tr.model} - Talla {tr.size}"
                     },
                     'requester_info': {
                         'name': f"{row.requester_first_name} {row.requester_last_name}",
@@ -158,24 +181,52 @@ class WarehouseRepository:
                     },
                     'location_info': {
                         'from': {
-                            'id': row.source_location_id,
+                            'id': tr.source_location_id,
                             'name': row.source_location_name,
                             'address': row.source_address or 'No especificada'
                         },
                         'to': {
-                            'id': row.destination_location_id,
-                            'name': row.destination_location_name,
-                            'address': row.destination_address or 'No especificada'
+                            'id': tr.destination_location_id,
+                            'name': dest_location.name if dest_location else 'Desconocido',
+                            'address': dest_location.address if dest_location else 'No especificada'
                         }
                     },
-                    'notes': row.notes
+                    'notes': tr.notes
                 })
             
+            logger.info(f"✅ Formateadas {len(requests)} solicitudes pendientes")
             return requests
             
         except Exception as e:
-            logger.exception("❌ Error obteniendo solicitudes pendientes")
+            logger.exception(f"❌ Error obteniendo solicitudes pendientes: {str(e)}")
+            # Rollback en caso de error
+            try:
+                self.db.rollback()
+            except:
+                pass
             return []
+
+    def _get_preparation_instruction(
+        self,
+        inventory_type: str,
+        brand: str,
+        model: str,
+        size: str,
+        quantity: int
+    ) -> str:
+        """
+        Generar instrucción clara de preparación para el bodeguero
+            """
+        product_name = f"{brand} {model} talla {size}"
+            
+        if inventory_type == 'pair':
+            return f"✅ Preparar {quantity} par(es) completo(s) de {product_name}"
+        elif inventory_type == 'left_only':
+            return f"👟← Preparar {quantity} pie(s) IZQUIERDO(S) de {product_name}"
+        elif inventory_type == 'right_only':
+            return f"👟→ Preparar {quantity} pie(s) DERECHO(S) de {product_name}"
+        else:
+            return f"⚠️ Preparar {quantity} unidad(es) de {product_name} (tipo desconocido)"
     
     def get_user_managed_locations(self, user_id: int, company_id: int) -> List[Dict[str, Any]]:
         """Obtener ubicaciones que un bodeguero puede gestionar - FILTRADO POR COMPANY_ID"""
@@ -255,150 +306,259 @@ class WarehouseRepository:
             self.db.rollback()
             return False
     
-   # app/modules/warehouse_new/repository.py - VERSIÓN MEJORADA
+
+    # def get_accepted_requests_by_warehouse_keeper(self, warehouse_keeper_id: int, company_id: int) -> List[Dict[str, Any]]:
+    #     """
+    #     Obtener solicitudes aceptadas por este bodeguero - FILTRADO POR COMPANY_ID
+        
+    #     Incluye:
+    #     - Imagen del producto
+    #     - Tipo de recogida (vendedor o corredor)
+    #     - Tipo de transferencia (transfer o return)
+    #     - Información completa de participantes
+    #     - Estado detallado con siguiente acción
+    #     """
+    #     try:
+    #         logger.info(f"Obteniendo solicitudes aceptadas para bodeguero {warehouse_keeper_id}")
+            
+    #         active_statuses = ['accepted', 'courier_assigned', 'delivered']
+            
+    #         transfers = self.db.query(TransferRequest).filter(
+    #             and_(
+    #                 TransferRequest.warehouse_keeper_id == warehouse_keeper_id,
+    #                 TransferRequest.company_id == company_id,
+    #                 TransferRequest.status.in_(active_statuses)
+    #             )
+    #         ).order_by(
+    #             # ✅ SINTAXIS CORRECTA con case()
+    #             case(
+    #                 (TransferRequest.purpose == 'cliente', 1),
+    #                 else_=2
+    #             ),
+    #             case(
+    #                 (TransferRequest.status == 'courier_assigned', 1),
+    #                 (TransferRequest.status == 'accepted', 2),
+    #                 else_=3
+    #             ),
+    #             TransferRequest.accepted_at.asc()
+    #         ).all()
+            
+    #         results = []
+    #         for transfer in transfers:
+    #             # Calcular tiempo desde aceptación
+    #             time_diff = datetime.now() - transfer.accepted_at if transfer.accepted_at else timedelta(0)
+    #             hours = int(time_diff.total_seconds() // 3600)
+    #             minutes = int((time_diff.total_seconds() % 3600) // 60)
+    #             time_since_accepted = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+                
+    #             # Obtener imagen del producto
+    #             product_image = self._get_product_image(
+    #                 transfer.sneaker_reference_code,
+    #                 transfer.source_location_id,
+    #                 company_id
+    #             )
+                
+    #             # Determinar tipo de transferencia
+    #             transfer_type = 'return' if transfer.original_transfer_id else 'transfer'
+    #             transfer_type_display = 'DEVOLUCIÓN' if transfer_type == 'return' else 'TRANSFERENCIA'
+                
+    #             # Determinar quién recoge
+    #             pickup_info = self._get_pickup_info(transfer)
+                
+    #             # Estado y siguiente acción
+    #             status_info = self._get_warehouse_status_info(transfer.status, transfer.pickup_type)
+                
+    #             # Información de ubicaciones
+    #             source_location = self.db.query(Location).filter(
+    #                 and_(
+    #                     Location.id == transfer.source_location_id,
+    #                     Location.company_id == company_id
+    #                 )
+    #             ).first()
+                
+    #             destination_location = self.db.query(Location).filter(
+    #                 and_(
+    #                     Location.id == transfer.destination_location_id,
+    #                     Location.company_id == company_id
+    #                 )
+    #             ).first()
+                
+    #             results.append({
+    #                 'id': transfer.id,
+    #                 'status': transfer.status,
+    #                 'status_info': status_info,
+                    
+    #                 # Información del producto
+    #                 'sneaker_reference_code': transfer.sneaker_reference_code,
+    #                 'brand': transfer.brand,
+    #                 'model': transfer.model,
+    #                 'size': transfer.size,
+    #                 'quantity': transfer.quantity,
+    #                 'product_image': product_image,
+    #                 'product_description': f"{transfer.brand} {transfer.model} - Talla {transfer.size}",
+                    
+    #                 # Tipo de transferencia
+    #                 'transfer_type': transfer_type,
+    #                 'transfer_type_display': transfer_type_display,
+    #                 'purpose': transfer.purpose,
+    #                 'priority': 'high' if transfer.purpose == 'cliente' else 'normal',
+                    
+    #                 # Información de recogida
+    #                 'pickup_type': transfer.pickup_type,
+    #                 'pickup_info': pickup_info,
+                    
+    #                 # Participantes
+    #                 'requester_info': {
+    #                     'id': transfer.requester_id,
+    #                     'name': f"{transfer.requester.first_name} {transfer.requester.last_name}" if transfer.requester else None,
+    #                     'role': transfer.requester.role if transfer.requester else None
+    #                 },
+    #                 'courier_info': {
+    #                     'id': transfer.courier_id,
+    #                     'name': f"{transfer.courier.first_name} {transfer.courier.last_name}" if transfer.courier else None,
+    #                     'assigned': transfer.courier_id is not None
+    #                 } if transfer.pickup_type == 'corredor' else None,
+                    
+    #                 # Ubicaciones
+    #                 'location_info': {
+    #                     'source': {
+    #                         'id': transfer.source_location_id,
+    #                         'name': source_location.name if source_location else None
+    #                     },
+    #                     'destination': {
+    #                         'id': transfer.destination_location_id,
+    #                         'name': destination_location.name if destination_location else None
+    #                     }
+    #                 },
+                    
+    #                 # Timestamps
+    #                 'requested_at': transfer.requested_at.isoformat() if transfer.requested_at else None,
+    #                 'accepted_at': transfer.accepted_at.isoformat() if transfer.accepted_at else None,
+    #                 'courier_accepted_at': transfer.courier_accepted_at.isoformat() if transfer.courier_accepted_at else None,
+    #                 'picked_up_at': transfer.picked_up_at.isoformat() if transfer.picked_up_at else None,
+    #                 'time_since_accepted': time_since_accepted,
+                    
+    #                 # Notas
+    #                 'notes': transfer.notes,
+    #                 'warehouse_notes': transfer.notes
+    #             })
+            
+    #         logger.info(f"{len(results)} solicitudes encontradas")
+    #         return results
+            
+    #     except Exception as e:
+    #         logger.exception("Error obteniendo solicitudes aceptadas")
+    #         return []
+
+
+    # app/modules/warehouse_new/repository.py
 
     def get_accepted_requests_by_warehouse_keeper(self, warehouse_keeper_id: int, company_id: int) -> List[Dict[str, Any]]:
         """
-        Obtener solicitudes aceptadas por este bodeguero - FILTRADO POR COMPANY_ID
-        
-        Incluye:
-        - Imagen del producto
-        - Tipo de recogida (vendedor o corredor)
-        - Tipo de transferencia (transfer o return)
-        - Información completa de participantes
-        - Estado detallado con siguiente acción
+        BG002: Obtener solicitudes aceptadas
+        ✅ CON ROLLBACK PREVENTIVO
         """
+        
+        # ✅ Rollback preventivo
         try:
-            logger.info(f"Obteniendo solicitudes aceptadas para bodeguero {warehouse_keeper_id}")
+            self.db.rollback()
+        except:
+            pass
+        
+        try:
+            logger.info(f"📋 Buscando solicitudes aceptadas para bodeguero {warehouse_keeper_id}")
             
-            active_statuses = ['accepted', 'courier_assigned', 'delivered']
-            
-            transfers = self.db.query(TransferRequest).filter(
+            query = self.db.query(
+                TransferRequest,
+                User.first_name.label('requester_first_name'),
+                User.last_name.label('requester_last_name'),
+                Location.name.label('source_location_name'),
+                func.coalesce(Product.image_url, '').label('product_image'),
+                func.coalesce(ProductSize.quantity, 0).label('stock_available')
+            ).join(
+                User, TransferRequest.requester_id == User.id
+            ).join(
+                Location, TransferRequest.source_location_id == Location.id
+            ).outerjoin(
+                Product,
                 and_(
-                    TransferRequest.warehouse_keeper_id == warehouse_keeper_id,
-                    TransferRequest.company_id == company_id,
-                    TransferRequest.status.in_(active_statuses)
+                    Product.reference_code == TransferRequest.sneaker_reference_code,
+                    Product.company_id == TransferRequest.company_id
                 )
+            ).outerjoin(
+                ProductSize,
+                and_(
+                    ProductSize.product_id == Product.id,
+                    ProductSize.size == TransferRequest.size,
+                    ProductSize.location_name == Location.name,
+                    ProductSize.inventory_type == TransferRequest.inventory_type.cast(ProductSize.inventory_type.type),
+                    ProductSize.company_id == TransferRequest.company_id
+                )
+            ).filter(
+                TransferRequest.status == 'accepted',
+                TransferRequest.warehouse_keeper_id == warehouse_keeper_id,
+                TransferRequest.company_id == company_id
             ).order_by(
-                # ✅ SINTAXIS CORRECTA con case()
-                case(
-                    (TransferRequest.purpose == 'cliente', 1),
-                    else_=2
-                ),
-                case(
-                    (TransferRequest.status == 'courier_assigned', 1),
-                    (TransferRequest.status == 'accepted', 2),
-                    else_=3
-                ),
                 TransferRequest.accepted_at.asc()
-            ).all()
+            )
             
-            results = []
-            for transfer in transfers:
-                # Calcular tiempo desde aceptación
-                time_diff = datetime.now() - transfer.accepted_at if transfer.accepted_at else timedelta(0)
-                hours = int(time_diff.total_seconds() // 3600)
-                minutes = int((time_diff.total_seconds() % 3600) // 60)
-                time_since_accepted = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+            results = query.all()
+            
+            logger.info(f"✅ Query ejecutado, {len(results)} resultados encontrados")
+            
+            requests = []
+            for row in results:
+                tr = row.TransferRequest
                 
-                # Obtener imagen del producto
-                product_image = self._get_product_image(
-                    transfer.sneaker_reference_code,
-                    transfer.source_location_id,
-                    company_id
-                )
+                # Etiquetas descriptivas
+                inventory_type_label = {
+                    'pair': '👟👟 Par completo',
+                    'left_only': '👟← Pie IZQUIERDO',
+                    'right_only': '👟→ Pie DERECHO'
+                }.get(tr.inventory_type or 'pair', '❓ Desconocido')
                 
-                # Determinar tipo de transferencia
-                transfer_type = 'return' if transfer.original_transfer_id else 'transfer'
-                transfer_type_display = 'DEVOLUCIÓN' if transfer_type == 'return' else 'TRANSFERENCIA'
-                
-                # Determinar quién recoge
-                pickup_info = self._get_pickup_info(transfer)
-                
-                # Estado y siguiente acción
-                status_info = self._get_warehouse_status_info(transfer.status, transfer.pickup_type)
-                
-                # Información de ubicaciones
-                source_location = self.db.query(Location).filter(
-                    and_(
-                        Location.id == transfer.source_location_id,
-                        Location.company_id == company_id
-                    )
+                # Obtener destino
+                dest_location = self.db.query(Location).filter(
+                    Location.id == tr.destination_location_id
                 ).first()
                 
-                destination_location = self.db.query(Location).filter(
-                    and_(
-                        Location.id == transfer.destination_location_id,
-                        Location.company_id == company_id
-                    )
-                ).first()
-                
-                results.append({
-                    'id': transfer.id,
-                    'status': transfer.status,
-                    'status_info': status_info,
+                requests.append({
+                    'id': tr.id,
+                    'status': tr.status,
+                    'request_type': tr.request_type,
+                    'sneaker_reference_code': tr.sneaker_reference_code,
+                    'brand': tr.brand,
+                    'model': tr.model,
+                    'size': tr.size,
+                    'quantity': tr.quantity,
                     
-                    # Información del producto
-                    'sneaker_reference_code': transfer.sneaker_reference_code,
-                    'brand': transfer.brand,
-                    'model': transfer.model,
-                    'size': transfer.size,
-                    'quantity': transfer.quantity,
-                    'product_image': product_image,
-                    'product_description': f"{transfer.brand} {transfer.model} - Talla {transfer.size}",
+                    # Información clara
+                    'inventory_type': tr.inventory_type or 'pair',
+                    'inventory_type_label': inventory_type_label,
+                    'what_to_deliver': f"{tr.quantity} × {inventory_type_label}",
                     
-                    # Tipo de transferencia
-                    'transfer_type': transfer_type,
-                    'transfer_type_display': transfer_type_display,
-                    'purpose': transfer.purpose,
-                    'priority': 'high' if transfer.purpose == 'cliente' else 'normal',
-                    
-                    # Información de recogida
-                    'pickup_type': transfer.pickup_type,
-                    'pickup_info': pickup_info,
-                    
-                    # Participantes
-                    'requester_info': {
-                        'id': transfer.requester_id,
-                        'name': f"{transfer.requester.first_name} {transfer.requester.last_name}" if transfer.requester else None,
-                        'role': transfer.requester.role if transfer.requester else None
-                    },
-                    'courier_info': {
-                        'id': transfer.courier_id,
-                        'name': f"{transfer.courier.first_name} {transfer.courier.last_name}" if transfer.courier else None,
-                        'assigned': transfer.courier_id is not None
-                    } if transfer.pickup_type == 'corredor' else None,
-                    
-                    # Ubicaciones
-                    'location_info': {
-                        'source': {
-                            'id': transfer.source_location_id,
-                            'name': source_location.name if source_location else None
-                        },
-                        'destination': {
-                            'id': transfer.destination_location_id,
-                            'name': destination_location.name if destination_location else None
-                        }
-                    },
-                    
-                    # Timestamps
-                    'requested_at': transfer.requested_at.isoformat() if transfer.requested_at else None,
-                    'accepted_at': transfer.accepted_at.isoformat() if transfer.accepted_at else None,
-                    'courier_accepted_at': transfer.courier_accepted_at.isoformat() if transfer.courier_accepted_at else None,
-                    'picked_up_at': transfer.picked_up_at.isoformat() if transfer.picked_up_at else None,
-                    'time_since_accepted': time_since_accepted,
-                    
-                    # Notas
-                    'notes': transfer.notes,
-                    'warehouse_notes': transfer.notes
+                    'purpose': tr.purpose,
+                    'pickup_type': tr.pickup_type,
+                    'accepted_at': tr.accepted_at.isoformat() if tr.accepted_at else None,
+                    'estimated_pickup_time': tr.estimated_pickup_time,
+                    'requester_name': f"{row.requester_first_name} {row.requester_last_name}",
+                    'source_location_name': row.source_location_name,
+                    'destination_location_name': dest_location.name if dest_location else 'Desconocido',
+                    'product_image': row.product_image,
+                    'stock_available': row.stock_available
                 })
             
-            logger.info(f"{len(results)} solicitudes encontradas")
-            return results
+            logger.info(f"✅ Formateadas {len(requests)} solicitudes aceptadas")
+            return requests
             
         except Exception as e:
-            logger.exception("Error obteniendo solicitudes aceptadas")
+            logger.exception(f"❌ Error obteniendo solicitudes aceptadas: {str(e)}")
+            try:
+                self.db.rollback()
+            except:
+                pass
             return []
+
 
     def _get_pickup_info(self, transfer: TransferRequest) -> Dict[str, Any]:
         """Obtener información detallada de quién recoge"""

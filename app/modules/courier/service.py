@@ -16,31 +16,39 @@ class CourierService:
         self.company_id = company_id
         self.repository = CourierRepository(db)
     
-    async def get_available_requests(self, courier_id: int, user_info: Dict[str, Any]) -> AvailableRequestsResponse:
+    async def get_available_requests(self, courier_id: int, user_info: Dict[str, Any]) -> Dict[str, Any]:
         """CO001: Obtener solicitudes disponibles para corredor"""
-        requests = self.repository.get_available_requests_for_courier(courier_id, self.company_id)
         
-        # Estadísticas como en backend antiguo
+        requests = self.repository.get_available_requests_for_courier(self.company_id)
+        
+        # ✅ USAR .get() PARA EVITAR KeyError
         breakdown = {
-            "available_to_accept": len([r for r in requests if r['status'] == 'accepted' and r['courier_id'] is None]),
-            "assigned_to_me": len([r for r in requests if r['courier_id'] == courier_id]),
-            "transfers": len([r for r in requests if r['request_type'] == 'transfer']),
-            "returns": len([r for r in requests if r['request_type'] == 'return']),
-            "urgent_returns": len([r for r in requests if r['request_type'] == 'return']),
-            "ready_for_delivery": len([r for r in requests if r['status'] == 'in_transit' and r['courier_id'] == courier_id])
+            "total": len(requests),
+            "available_to_accept": len([
+                r for r in requests 
+                if r.get('status') == 'accepted' and r.get('courier_id') is None
+            ]),
+            "assigned_to_me": len([
+                r for r in requests 
+                if r.get('courier_id') == courier_id
+            ]),
+            "in_transit": len([
+                r for r in requests 
+                if r.get('status') == 'in_transit' and r.get('courier_id') == courier_id
+            ])
         }
         
-        return AvailableRequestsResponse(
-            success=True,
-            message="Vista unificada: transferencias y devoluciones siguen exactamente el mismo proceso",
-            available_requests=requests,
-            count=len(requests),
-            breakdown=breakdown,
-            courier_info={
+        return {
+            "success": True,
+            "message": f"Solicitudes disponibles para transporte",
+            "available_requests": requests,
+            "count": len(requests),
+            "breakdown": breakdown,
+            "courier_info": {
                 "name": f"{user_info['first_name']} {user_info['last_name']}",
                 "courier_id": courier_id
             }
-        )
+        }
     
     async def accept_request(self, request_id: int, acceptance: CourierAcceptance, courier_id: int) -> Dict[str, Any]:
         """CO002: Aceptar solicitud e iniciar recorrido"""

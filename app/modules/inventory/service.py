@@ -1,11 +1,28 @@
-from typing import List ,Dict
+from typing import List ,Dict ,Optional ,Literal
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_, func
+from datetime import datetime
 
-from app.shared.database.models import Location
+
+from app.shared.database.models import Location ,Product,ProductSize
+from app.shared.schemas.inventory_distribution import PairFormationResult
+
 
 from .repository import InventoryRepository
 from .schemas import ProductResponse, InventorySearchParams, InventoryByRoleParams, GroupedInventoryResponse, LocationInventoryResponse, LocationInfo, ProductInfo, SimpleInventoryResponse, SimpleLocationInventory
+
+from .schemas import (
+    ManualPairFormationRequest,
+    ManualPairFormationResponse,
+    FormableOpportunitiesRequest,
+    FormableOpportunitiesResponse
+)
+
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class InventoryService:
     def __init__(self, db: Session, company_id: int):
@@ -837,3 +854,412 @@ class InventoryService:
                 })
         
         return formatted
+
+    async def form_pair_manually(
+        self,
+        request: ManualPairFormationRequest,
+        user_id: int
+    ) -> ManualPairFormationResponse:
+        """
+        🆕 Formar pares manualmente desde pies individuales
+        
+        Casos de uso:
+        - Vendedor tiene ambos pies pero no se formó par automáticamente
+        - Admin decide consolidar inventario
+        - Pies llegaron en momentos diferentes sin transferencia
+        
+        Proceso:
+        1. Validar que el producto existe
+        2. Validar que la ubicación existe
+        3. Verificar disponibilidad de ambos pies
+        4. Formar pares
+        5. Registrar en historial
+        """
+        
+        try:
+            logger.info(f"🔨 Formación manual de par solicitada")
+            logger.info(f"   Usuario: {user_id}")
+            logger.info(f"   Producto: {request.reference_code}")
+            logger.info(f"   Talla: {request.size}")
+            logger.info(f"   Ubicación ID: {request.location_id}")
+            logger.info(f"   Cantidad: {request.quantity}")
+            
+            # 1. Buscar producto
+            product = self.db.query(Product).filter(
+                and_(
+                    Product.reference_code == request.reference_code,
+                    Product.company_id == self.company_id
+                )
+            ).first()
+            
+            if not product:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Producto '{request.reference_code}' no encontrado"
+                )
+            
+            logger.info(f"   ✅ Producto encontrado: {product.brand} {product.model}")
+            
+            # 2. Buscar ubicación
+            location = self.db.query(Location).filter(
+                and_(
+                    Location.id == request.location_id,
+                    Location.company_id == self.company_id
+                )
+            ).first()
+            
+            if not location:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Ubicación con ID {request.location_id} no encontrada"
+                )
+            
+            logger.info(f"   ✅ Ubicación encontrada: {location.name}")
+            
+            # 3. Buscar pies individuales
+            left_foot = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product.id,
+                    ProductSize.size == request.size,
+                    ProductSize.location_name == location.name,
+                    ProductSize.inventory_type == 'left_only',
+                    ProductSize.company_id == self.company_id
+                )
+            ).first()
+            
+            right_foot = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product.id,
+                    ProductSize.size == request.size,
+                    ProductSize.location_name == location.name,
+                    ProductSize.inventory_type == 'right_only',
+                    ProductSize.company_id == self.company_id
+                )
+            ).first()
+            
+            # Validar disponibilidad
+            if not left_foot or left_foot.quantity == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No hay pies izquierdos disponibles en {location.name}"
+                )
+            
+            if not right_foot or right_foot.quantity == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No hay pies derechos disponibles en {location.name}"
+                )
+            
+            # Validar cantidad solicitada
+            max_formable = min(left_foot.quantity, right_foot.quantity)
+            
+            if request.quantity > max_formable:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"No se pueden formar {request.quantity} par(es). "
+                        f"Máximo formable: {max_formable} "
+                        f"(Izquierdos: {left_foot.quantity}, Derechos: {right_foot.quantity})"
+                    )
+                )
+            
+            logger.info(f"   ✅ Validación exitosa:")
+            logger.info(f"      Pies izquierdos: {left_foot.quantity}")
+            logger.info(f"      Pies derechos: {right_foot.quantity}")
+            logger.info(f"      A formar: {request.quantity} par(es)")
+            
+            # 4. Formar pares
+            result = await self._execute_pair_formation(
+                product_id=product.id,
+                size=request.size,
+                location_name=location.name,
+                quantity=request.quantity,
+                left_foot=left_foot,
+                right_foot=right_foot,
+                user_id=user_id,
+                notes=request.notes
+            )
+            
+            # 5. Consultar estado final del inventario
+            final_left = left_foot.quantity
+            final_right = right_foot.quantity
+            
+            pairs_record = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product.id,
+                    ProductSize.size == request.size,
+                    ProductSize.location_name == location.name,
+                    ProductSize.inventory_type == 'pair',
+                    ProductSize.company_id == self.company_id
+                )
+            ).first()
+            
+            total_pairs = pairs_record.quantity if pairs_record else 0
+            
+            logger.info(f"   🎉 PAR FORMADO EXITOSAMENTE!")
+            logger.info(f"      Ubicación: {location.name}")
+            logger.info(f"      Cantidad: {request.quantity} par(es)")
+            logger.info(f"      Estado final:")
+            logger.info(f"         - Izquierdos: {final_left}")
+            logger.info(f"         - Derechos: {final_right}")
+            logger.info(f"         - Pares: {total_pairs}")
+            
+            # 6. Construir respuesta
+            return ManualPairFormationResponse(
+                success=True,
+                message=f"✅ {request.quantity} par(es) formado(s) exitosamente en {location.name}",
+                pairs_formed=request.quantity,
+                location_name=location.name,
+                product_info={
+                    "reference_code": product.reference_code,
+                    "brand": product.brand,
+                    "model": product.model,
+                    "size": request.size
+                },
+                inventory_updated={
+                    "left_feet_remaining": final_left,
+                    "right_feet_remaining": final_right,
+                    "pairs_total": total_pairs
+                },
+                pair_formation_result=result
+            )
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception(f"❌ Error formando par manualmente: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error formando par: {str(e)}"
+            )
+    
+    
+    # ========== MÉTODO AUXILIAR: EJECUTAR FORMACIÓN ==========
+    async def _execute_pair_formation(
+        self,
+        product_id: int,
+        size: str,
+        location_name: str,
+        quantity: int,
+        left_foot: ProductSize,
+        right_foot: ProductSize,
+        user_id: int,
+        notes: Optional[str] = None
+    ) -> PairFormationResult:
+        """
+        Ejecutar la formación de pares (lógica central)
+        """
+        
+        # 1. Restar de pies individuales
+        left_foot.quantity -= quantity
+        right_foot.quantity -= quantity
+        
+        # 2. Buscar o crear ProductSize de tipo 'pair'
+        pair = self.db.query(ProductSize).filter(
+            and_(
+                ProductSize.product_id == product_id,
+                ProductSize.size == size,
+                ProductSize.location_name == location_name,
+                ProductSize.inventory_type == 'pair',
+                ProductSize.company_id == self.company_id
+            )
+        ).first()
+        
+        if pair:
+            pair.quantity += quantity
+        else:
+            pair = ProductSize(
+                product_id=product_id,
+                size=size,
+                quantity=quantity,
+                inventory_type='pair',
+                location_name=location_name,
+                company_id=self.company_id
+            )
+            self.db.add(pair)
+        
+        # 3. Registrar en historial
+        change_notes = f"Formación manual de {quantity} par(es) en {location_name}. "
+        if notes:
+            change_notes += f"Notas: {notes}"
+        
+        inventory_change = InventoryChange(
+            product_id=product_id,
+            change_type='manual_pair_formation',
+            quantity_before=0,
+            quantity_after=quantity,
+            user_id=user_id,
+            company_id=self.company_id,
+            notes=change_notes
+        )
+        self.db.add(inventory_change)
+        
+        # 4. Commit
+        self.db.commit()
+        
+        return PairFormationResult(
+            formed=True,
+            pair_product_size_id=pair.id,
+            location_name=location_name,
+            quantity_formed=quantity,
+            remaining_left=left_foot.quantity,
+            remaining_right=right_foot.quantity
+        )
+    
+    
+    # ========== NUEVO MÉTODO: CONSULTAR OPORTUNIDADES ==========
+    async def get_formable_opportunities(
+        self,
+        request: FormableOpportunitiesRequest
+    ) -> FormableOpportunitiesResponse:
+        """
+        🆕 Obtener lista de oportunidades de formar pares
+        
+        Retorna productos que tienen ambos pies en la misma ubicación
+        y pueden formar pares inmediatamente
+        """
+        
+        try:
+            logger.info(f"🔍 Buscando oportunidades de formación de pares...")
+            
+            # Query para encontrar ubicaciones con ambos pies del mismo producto/talla
+            opportunities_query = self.db.query(
+                ProductSize.product_id,
+                ProductSize.size,
+                ProductSize.location_name,
+                func.sum(
+                    func.case(
+                        (ProductSize.inventory_type == 'left_only', ProductSize.quantity),
+                        else_=0
+                    )
+                ).label('left_feet'),
+                func.sum(
+                    func.case(
+                        (ProductSize.inventory_type == 'right_only', ProductSize.quantity),
+                        else_=0
+                    )
+                ).label('right_feet')
+            ).filter(
+                and_(
+                    ProductSize.company_id == self.company_id,
+                    ProductSize.inventory_type.in_(['left_only', 'right_only']),
+                    ProductSize.quantity > 0
+                )
+            ).group_by(
+                ProductSize.product_id,
+                ProductSize.size,
+                ProductSize.location_name
+            ).having(
+                and_(
+                    func.sum(
+                        func.case(
+                            (ProductSize.inventory_type == 'left_only', ProductSize.quantity),
+                            else_=0
+                        )
+                    ) > 0,
+                    func.sum(
+                        func.case(
+                            (ProductSize.inventory_type == 'right_only', ProductSize.quantity),
+                            else_=0
+                        )
+                    ) > 0
+                )
+            )
+            
+            # Filtrar por ubicación si se especifica
+            if request.location_id:
+                location = self.db.query(Location).filter(
+                    Location.id == request.location_id
+                ).first()
+                
+                if location:
+                    opportunities_query = opportunities_query.filter(
+                        ProductSize.location_name == location.name
+                    )
+            
+            results = opportunities_query.all()
+            
+            logger.info(f"   Encontradas {len(results)} oportunidades potenciales")
+            
+            # Construir lista de oportunidades
+            opportunities = []
+            total_formable_pairs = 0
+            estimated_value = 0.0
+            
+            for result in results:
+                product_id, size, location_name, left_feet, right_feet = result
+                
+                # Calcular pares formables
+                can_form_pairs = min(left_feet, right_feet)
+                
+                # Filtrar por mínimo de pares
+                if can_form_pairs < request.min_pairs:
+                    continue
+                
+                # Buscar información del producto
+                product = self.db.query(Product).filter(
+                    Product.id == product_id
+                ).first()
+                
+                if not product:
+                    continue
+                
+                # Buscar ID de ubicación
+                location = self.db.query(Location).filter(
+                    and_(
+                        Location.name == location_name,
+                        Location.company_id == self.company_id
+                    )
+                ).first()
+                
+                # Calcular valor estimado
+                unit_price = float(product.unit_price) if product.unit_price else 0.0
+                opportunity_value = unit_price * can_form_pairs
+                
+                # Determinar prioridad
+                priority = "high" if can_form_pairs >= 3 else "medium" if can_form_pairs >= 2 else "low"
+                
+                opportunity = {
+                    "reference_code": product.reference_code,
+                    "brand": product.brand,
+                    "model": product.model,
+                    "size": size,
+                    "location": location_name,
+                    "location_id": location.id if location else None,
+                    "left_feet": left_feet,
+                    "right_feet": right_feet,
+                    "can_form_pairs": can_form_pairs,
+                    "unit_price": unit_price,
+                    "total_value": opportunity_value,
+                    "priority": priority
+                }
+                
+                opportunities.append(opportunity)
+                total_formable_pairs += can_form_pairs
+                estimated_value += opportunity_value
+            
+            # Ordenar por prioridad y valor
+            priority_order = {"high": 0, "medium": 1, "low": 2}
+            opportunities.sort(
+                key=lambda x: (priority_order[x["priority"]], -x["total_value"])
+            )
+            
+            logger.info(f"   ✅ {len(opportunities)} oportunidades válidas encontradas")
+            logger.info(f"   📊 Total pares formables: {total_formable_pairs}")
+            logger.info(f"   💰 Valor estimado: ${estimated_value:,.0f}")
+            
+            return FormableOpportunitiesResponse(
+                success=True,
+                message=f"Se encontraron {len(opportunities)} oportunidades de formación",
+                opportunities=opportunities,
+                total_opportunities=len(opportunities),
+                total_formable_pairs=total_formable_pairs,
+                estimated_value=estimated_value
+            )
+            
+        except Exception as e:
+            logger.exception(f"❌ Error buscando oportunidades: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error buscando oportunidades: {str(e)}"
+            )

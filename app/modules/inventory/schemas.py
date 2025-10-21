@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any, List ,Literal
 from decimal import Decimal
 from datetime import datetime
 from app.shared.schemas.common import BaseResponse
-from app.shared.schemas.inventory_distribution import InventoryTypeEnum
+from app.shared.schemas.inventory_distribution import InventoryTypeEnum ,PairFormationResult
 
 
 
@@ -402,5 +402,113 @@ class ScanResponseEnhanced(BaseModel):
                 "global_distribution": {},
                 "suggestions": [],
                 "processing_time_ms": 245.5
+            }
+        }
+
+class ManualPairFormationRequest(BaseModel):
+    """
+    Request para formar pares manualmente
+    
+    Usado cuando:
+    - Ambos pies están en la misma ubicación
+    - No se formó par automáticamente
+    - Admin/vendedor decide formar manualmente
+    """
+    reference_code: str = Field(..., description="Código de referencia del producto")
+    size: str = Field(..., description="Talla")
+    location_id: int = Field(..., description="ID de ubicación donde formar el par")
+    quantity: int = Field(1, ge=1, description="Cantidad de pares a formar")
+    notes: Optional[str] = Field(None, max_length=500, description="Notas adicionales")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "reference_code": "NK-AM90-BLK-001",
+                "size": "42",
+                "location_id": 2,
+                "quantity": 1,
+                "notes": "Formación manual solicitada por vendedor"
+            }
+        }
+
+
+class ManualPairFormationResponse(BaseResponse):
+    """
+    Respuesta de formación manual de pares
+    """
+    pairs_formed: int
+    location_name: str
+    product_info: dict
+    inventory_updated: dict
+    pair_formation_result: PairFormationResult
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Par formado exitosamente",
+                "pairs_formed": 1,
+                "location_name": "Local Centro",
+                "product_info": {
+                    "reference_code": "NK-AM90-BLK-001",
+                    "brand": "Nike",
+                    "model": "Air Max 90",
+                    "size": "42"
+                },
+                "inventory_updated": {
+                    "left_feet_remaining": 0,
+                    "right_feet_remaining": 0,
+                    "pairs_total": 5
+                },
+                "pair_formation_result": {
+                    "formed": True,
+                    "quantity_formed": 1,
+                    "location_name": "Local Centro"
+                }
+            }
+        }
+
+
+class FormableOpportunitiesRequest(BaseModel):
+    """
+    Request para consultar oportunidades de formación
+    """
+    location_id: Optional[int] = Field(None, description="Filtrar por ubicación específica")
+    min_pairs: int = Field(1, ge=1, description="Mínimo de pares formables para incluir")
+
+
+class FormableOpportunitiesResponse(BaseResponse):
+    """
+    Lista de oportunidades de formar pares
+    """
+    opportunities: List[dict]
+    total_opportunities: int
+    total_formable_pairs: int
+    estimated_value: float
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Oportunidades encontradas",
+                "opportunities": [
+                    {
+                        "reference_code": "NK-AM90-001",
+                        "brand": "Nike",
+                        "model": "Air Max 90",
+                        "size": "42",
+                        "location": "Local Centro",
+                        "location_id": 2,
+                        "left_feet": 2,
+                        "right_feet": 2,
+                        "can_form_pairs": 2,
+                        "unit_price": 150000,
+                        "total_value": 300000,
+                        "priority": "high"
+                    }
+                ],
+                "total_opportunities": 5,
+                "total_formable_pairs": 12,
+                "estimated_value": 1800000
             }
         }

@@ -135,3 +135,52 @@ class ClassificationRepository:
             }
             for p in products
         ]
+
+    def get_product_sizes(self, product_id: int, company_id: int) -> List[Dict[str, Any]]:
+        """
+        Obtener todas las tallas de un producto con información de inventory_type
+        
+        Usado por el scanner para mostrar disponibilidad de pies individuales
+        """
+        product_sizes = self.db.query(ProductSize).filter(
+            and_(
+                ProductSize.product_id == product_id,
+                ProductSize.company_id == company_id,
+                ProductSize.quantity > 0
+            )
+        ).all()
+        
+        result = []
+        for ps in product_sizes:
+            result.append({
+                "id": ps.id,
+                "size": ps.size,
+                "quantity": ps.quantity,
+                "quantity_exhibition": ps.quantity_exhibition or 0,
+                "inventory_type": ps.inventory_type,
+                "location_name": ps.location_name
+            })
+        
+        # Agrupar por talla y tipo
+        grouped = {}
+        for item in result:
+            key = f"{item['size']}_{item['location_name']}"
+            if key not in grouped:
+                grouped[key] = {
+                    "size": item['size'],
+                    "location_name": item['location_name'],
+                    "pairs": 0,
+                    "left_feet": 0,
+                    "right_feet": 0,
+                    "pairs_exhibition": 0
+                }
+            
+            if item['inventory_type'] == 'pair':
+                grouped[key]['pairs'] = item['quantity']
+                grouped[key]['pairs_exhibition'] = item['quantity_exhibition']
+            elif item['inventory_type'] == 'left_only':
+                grouped[key]['left_feet'] = item['quantity']
+            elif item['inventory_type'] == 'right_only':
+                grouped[key]['right_feet'] = item['quantity']
+        
+        return list(grouped.values())

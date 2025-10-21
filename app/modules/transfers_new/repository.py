@@ -1,7 +1,7 @@
 # app/modules/transfers_new/repository.py
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, desc, func, text
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional ,Literal
 from datetime import datetime, timedelta
 from decimal import Decimal
 import logging
@@ -32,6 +32,7 @@ class TransfersRepository:
             pickup_type=transfer_data['pickup_type'],
             destination_type=transfer_data.get('destination_type', 'bodega'),
             notes=transfer_data.get('notes'),
+            inventory_type=transfer_data.get('inventory_type', 'pair'),
             status='pending',
             requested_at=datetime.now()
         )
@@ -479,3 +480,166 @@ class TransfersRepository:
                     return line.replace("Razón:", "").strip()
         
         return "No especificado"    
+
+    def validate_single_foot_availability(
+        self,
+        product_id: int,
+        size: str,
+        inventory_type: Literal['left_only', 'right_only'],
+        location_name: str,
+        quantity: int,
+        company_id: int
+    ) -> Dict[str, Any]:
+        """
+        Validar que hay suficientes pies del tipo solicitado
+        
+        Returns:
+            {
+                "available": bool,
+                "current_stock": int,
+                "requested": int,
+                "can_fulfill": bool
+            }
+        """
+        
+        product_size = self.db.query(ProductSize).filter(
+            and_(
+                ProductSize.product_id == product_id,
+                ProductSize.size == size,
+                ProductSize.location_name == location_name,
+                ProductSize.inventory_type == inventory_type,
+                ProductSize.company_id == company_id
+            )
+        ).first()
+        
+        current_stock = product_size.quantity if product_size else 0
+        can_fulfill = current_stock >= quantity
+        
+        return {
+            "available": product_size is not None,
+            "current_stock": current_stock,
+            "requested": quantity,
+            "can_fulfill": can_fulfill
+        }
+    
+    
+    # ========== BUSCAR PIE OPUESTO EN DESTINO ==========
+    def find_opposite_foot_in_location(
+        self,
+        reference_code: str,
+        size: str,
+        location_id: int,
+        received_inventory_type: str,
+        company_id: int
+    ) -> Optional[Dict[str, Any]]:  # ✅ Cambiar a Dict en lugar de OppositeFootInfo
+        """
+        Buscar si existe el pie opuesto en la ubicación destino
+        
+        Returns:
+            Dict con información del pie opuesto o None si no existe
+        """
+        
+        # Determinar qué pie buscar
+        opposite_type = 'right_only' if received_inventory_type == 'left_only' else 'left_only'
+        
+        # Buscar producto
+        product = self.db.query(Product).filter(
+            and_(
+                Product.reference_code == reference_code,
+                Product.company_id == company_id
+            )
+        ).first()
+        
+        if not product:
+            return None
+        
+        # Buscar ubicación
+        location = self.db.query(Location).filter(
+            and_(
+                Location.id == location_id,
+                Location.company_id == company_id
+            )
+        ).first()
+        
+        if not location:
+            return None
+        
+        # Buscar ProductSize del pie opuesto
+        opposite_foot = self.db.query(ProductSize).filter(
+            and_(
+                ProductSize.product_id == product.id,
+                ProductSize.size == size,
+                ProductSize.location_name == location.name,
+                ProductSize.inventory_type == opposite_type,
+                ProductSize.quantity > 0,
+                ProductSize.company_id == company_id
+            )
+        ).first()
+        
+        if not opposite_foot:
+            return None
+        
+        # ✅ RETORNAR COMO DICCIONARIO (no como OppositeFootInfo)
+        return {
+            "exists": True,
+            "product_size_id": opposite_foot.id,
+            "inventory_type": opposite_foot.inventory_type,
+            "quantity": opposite_foot.quantity,
+            "location_name": location.name,
+            "can_form_pairs": True
+        }
+    
+    
+    # ========== BUSCAR TRANSFERENCIA PENDIENTE DEL PIE OPUESTO ==========
+    def find_pending_opposite_transfer(
+        self,
+        reference_code: str,
+        size: str,
+        destination_location_id: int,
+        received_inventory_type: Literal['left_only', 'right_only'],
+        company_id: int
+    ) -> Optional[TransferRequest]:
+        """
+        Buscar si hay una transferencia pendiente del pie opuesto
+        hacia la misma ubicación
+        
+        Útil para:
+        - Detectar que llegó el primer pie de un par
+        - Auto-formar cuando llegue el segundo
+        """
+        
+        opposite_type = 'right_only' if received_inventory_type == 'left_only' else 'left_only'
+        
+        return self.db.query(TransferRequest).filter(
+            and_(
+                TransferRequest.sneaker_reference_code == reference_code,
+                TransferRequest.size == size,
+                TransferRequest.destination_location_id == destination_location_id,
+                TransferRequest.inventory_type == opposite_type,
+                TransferRequest.status.in_(['pending', 'accepted', 'in_transit']),
+                TransferRequest.company_id == company_id
+            )
+        ).first()
+
+    def link_formed_pair_transfers(
+        self,
+        left_transfer_id: int,
+        right_transfer_id: int
+    ) -> None:
+        """
+        Vincular dos transferencias que formaron un par
+        """
+        left_transfer = self.db.query(TransferRequest).filter(
+            TransferRequest.id == left_transfer_id
+        ).first()
+        
+        right_transfer = self.db.query(TransferRequest).filter(
+            TransferRequest.id == right_transfer_id
+        ).first()
+        
+        if left_transfer and right_transfer:
+            left_transfer.auto_formed_pair_id = right_transfer_id
+            right_transfer.auto_formed_pair_id = left_transfer_id
+            self.db.commit()
+            
+            logger.info(f"✅ Transfers {left_transfer_id} y {right_transfer_id} vinculados como par formado")

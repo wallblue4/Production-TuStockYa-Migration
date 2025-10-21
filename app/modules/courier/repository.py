@@ -7,127 +7,261 @@ from datetime import datetime, timedelta, date
 from app.shared.database.models import (
     TransferRequest, User, Location, Product, TransportIncident
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 class CourierRepository:
     def __init__(self, db: Session):
         self.db = db
     
-    def get_available_requests_for_courier(self, courier_id: int, company_id: int) -> List[Dict[str, Any]]:
-        """CO001: Obtener solicitudes disponibles para corredor - FILTRADO POR COMPANY_ID"""
-        # Query compleja como en el backend standalone
-        query = text("""
-            SELECT tr.*, 
-                   sl.name as source_location_name,
-                   sl.address as source_address,
-                   dl.name as destination_location_name,
-                   dl.address as destination_address,
-                   wk.first_name as warehouse_keeper_first_name,
-                   wk.last_name as warehouse_keeper_last_name,
-                   r.first_name as requester_first_name,
-                   r.last_name as requester_last_name,
-                   p.image_url as product_image,
-                   CASE 
-                       WHEN tr.original_transfer_id IS NOT NULL THEN 'return'
-                       ELSE 'transfer'
-                   END as request_type,
-                   CASE 
-                       WHEN tr.original_transfer_id IS NOT NULL THEN 'DEVOLUCIÓN'
-                       ELSE 'TRANSFERENCIA'
-                   END as request_display_type
-            FROM transfer_requests tr
-            JOIN locations sl ON tr.source_location_id = sl.id
-            JOIN locations dl ON tr.destination_location_id = dl.id
-            LEFT JOIN users wk ON tr.warehouse_keeper_id = wk.id
-            JOIN users r ON tr.requester_id = r.id
-            LEFT JOIN products p ON tr.sneaker_reference_code = p.reference_code
-            WHERE tr.pickup_type = 'corredor'
-                AND tr.status = 'accepted'
-                AND tr.company_id = :company_id
-                AND sl.company_id = :company_id
-                AND dl.company_id = :company_id
-            ORDER BY 
-                CASE WHEN tr.purpose = 'cliente' THEN 1 ELSE 2 END,
-                CASE WHEN tr.courier_id = :courier_id THEN 1 ELSE 2 END,
-                tr.accepted_at ASC
-        """)
+    # def get_available_requests_for_courier(self, courier_id: int, company_id: int) -> List[Dict[str, Any]]:
+    #     """CO001: Obtener solicitudes disponibles para corredor - FILTRADO POR COMPANY_ID"""
+    #     # Query compleja como en el backend standalone
+    #     query = text("""
+    #         SELECT tr.*, 
+    #                sl.name as source_location_name,
+    #                sl.address as source_address,
+    #                dl.name as destination_location_name,
+    #                dl.address as destination_address,
+    #                wk.first_name as warehouse_keeper_first_name,
+    #                wk.last_name as warehouse_keeper_last_name,
+    #                r.first_name as requester_first_name,
+    #                r.last_name as requester_last_name,
+    #                p.image_url as product_image,
+    #                CASE 
+    #                    WHEN tr.original_transfer_id IS NOT NULL THEN 'return'
+    #                    ELSE 'transfer'
+    #                END as request_type,
+    #                CASE 
+    #                    WHEN tr.original_transfer_id IS NOT NULL THEN 'DEVOLUCIÓN'
+    #                    ELSE 'TRANSFERENCIA'
+    #                END as request_display_type
+    #         FROM transfer_requests tr
+    #         JOIN locations sl ON tr.source_location_id = sl.id
+    #         JOIN locations dl ON tr.destination_location_id = dl.id
+    #         LEFT JOIN users wk ON tr.warehouse_keeper_id = wk.id
+    #         JOIN users r ON tr.requester_id = r.id
+    #         LEFT JOIN products p ON tr.sneaker_reference_code = p.reference_code
+    #         WHERE tr.pickup_type = 'corredor'
+    #             AND tr.status = 'accepted'
+    #             AND tr.company_id = :company_id
+    #             AND sl.company_id = :company_id
+    #             AND dl.company_id = :company_id
+    #         ORDER BY 
+    #             CASE WHEN tr.purpose = 'cliente' THEN 1 ELSE 2 END,
+    #             CASE WHEN tr.courier_id = :courier_id THEN 1 ELSE 2 END,
+    #             tr.accepted_at ASC
+    #     """)
         
-        results = self.db.execute(query, {"courier_id": courier_id, "company_id": company_id}).fetchall()
+    #     results = self.db.execute(query, {"courier_id": courier_id, "company_id": company_id}).fetchall()
         
-        requests = []
-        for row in results:
-            # Determinar acción requerida y estado
-            if row.status == 'accepted' and row.courier_id is None:
-                action_required = "accept"
-                status_description = f"Disponible para aceptar {row.request_display_type}"
-                urgency = "high" if row.purpose == 'cliente' else "normal"
-            elif row.status == 'accepted' and row.courier_id == courier_id:
-                action_required = "pickup"
-                status_description = f"Ir a recoger {row.request_display_type}"
-                urgency = "medium"
-            elif row.status == 'in_transit' and row.courier_id == courier_id:
-                action_required = "deliver"
-                status_description = f"En tránsito - entregar {row.request_display_type}"
-                urgency = "high"
-            else:
-                action_required = "none"
-                status_description = "No disponible"
-                urgency = "normal"
+    #     requests = []
+    #     for row in results:
+    #         # Determinar acción requerida y estado
+    #         if row.status == 'accepted' and row.courier_id is None:
+    #             action_required = "accept"
+    #             status_description = f"Disponible para aceptar {row.request_display_type}"
+    #             urgency = "high" if row.purpose == 'cliente' else "normal"
+    #         elif row.status == 'accepted' and row.courier_id == courier_id:
+    #             action_required = "pickup"
+    #             status_description = f"Ir a recoger {row.request_display_type}"
+    #             urgency = "medium"
+    #         elif row.status == 'in_transit' and row.courier_id == courier_id:
+    #             action_required = "deliver"
+    #             status_description = f"En tránsito - entregar {row.request_display_type}"
+    #             urgency = "high"
+    #         else:
+    #             action_required = "none"
+    #             status_description = "No disponible"
+    #             urgency = "normal"
             
-            # Calcular priority score (tiempo desde aceptación)
-            priority_score = 0.0
-            if row.accepted_at:
-                accepted_time = row.accepted_at
-                if isinstance(accepted_time, str):
-                    accepted_time = datetime.fromisoformat(accepted_time.replace('Z', '+00:00'))
-                time_since_accepted = datetime.now() - accepted_time
-                priority_score = time_since_accepted.total_seconds() / 3600  # horas
+    #         # Calcular priority score (tiempo desde aceptación)
+    #         priority_score = 0.0
+    #         if row.accepted_at:
+    #             accepted_time = row.accepted_at
+    #             if isinstance(accepted_time, str):
+    #                 accepted_time = datetime.fromisoformat(accepted_time.replace('Z', '+00:00'))
+    #             time_since_accepted = datetime.now() - accepted_time
+    #             priority_score = time_since_accepted.total_seconds() / 3600  # horas
             
-            # Información del producto
-            product_image = row.product_image
-            if not product_image:
-                product_image = f"https://via.placeholder.com/300x200?text={row.brand}+{row.model}"
+    #         # Información del producto
+    #         product_image = row.product_image
+    #         if not product_image:
+    #             product_image = f"https://via.placeholder.com/300x200?text={row.brand}+{row.model}"
             
-            requests.append({
-                'id': row.id,
-                'status': row.status,
-                'request_type': row.request_type,
-                'request_display_type': row.request_display_type,
-                'sneaker_reference_code': row.sneaker_reference_code,
-                'brand': row.brand,
-                'model': row.model,
-                'size': row.size,
-                'quantity': row.quantity,
-                'purpose': row.purpose,
-                'courier_id': row.courier_id,
-                'action_required': action_required,
-                'status_description': status_description,
-                'urgency': urgency,
-                'priority_score': priority_score,
-                'product_image': product_image,
-                'transport_info': {
-                    'pickup_location': {
-                        'name': row.source_location_name,
-                        'address': row.source_address or 'Dirección no disponible',
-                        'contact': f"{row.warehouse_keeper_first_name or ''} {row.warehouse_keeper_last_name or ''}".strip()
+    #         requests.append({
+    #             'id': row.id,
+    #             'status': row.status,
+    #             'request_type': row.request_type,
+    #             'request_display_type': row.request_display_type,
+    #             'sneaker_reference_code': row.sneaker_reference_code,
+    #             'brand': row.brand,
+    #             'model': row.model,
+    #             'size': row.size,
+    #             'quantity': row.quantity,
+    #             'purpose': row.purpose,
+    #             'courier_id': row.courier_id,
+    #             'action_required': action_required,
+    #             'status_description': status_description,
+    #             'urgency': urgency,
+    #             'priority_score': priority_score,
+    #             'product_image': product_image,
+    #             'transport_info': {
+    #                 'pickup_location': {
+    #                     'name': row.source_location_name,
+    #                     'address': row.source_address or 'Dirección no disponible',
+    #                     'contact': f"{row.warehouse_keeper_first_name or ''} {row.warehouse_keeper_last_name or ''}".strip()
+    #                 },
+    #                 'delivery_location': {
+    #                     'name': row.destination_location_name,
+    #                     'address': row.destination_address or 'Dirección no disponible',
+    #                     'contact': f"{row.requester_first_name} {row.requester_last_name}"
+    #                 },
+    #                 'route_context': "DEVOLUCIÓN: Producto regresa al origen" if row.request_type == 'return' else "TRANSFERENCIA: Producto va al destino"
+    #             },
+    #             'request_info': {
+    #                 'pickup_location': row.source_location_name,
+    #                 'pickup_address': row.source_address,
+    #                 'delivery_location': row.destination_location_name,
+    #                 'delivery_address': row.destination_address,
+    #                 'product_description': f"{row.brand} {row.model} - Talla {row.size}",
+    #                 'urgency': "Cliente presente" if row.purpose == 'cliente' else "Restock"
+    #             }
+    #         })
+        
+    #     return requests
+
+    # app/modules/courier/repository.py
+
+   # app/modules/courier/repository.py
+
+    def get_available_requests_for_courier(self, company_id: int) -> List[Dict[str, Any]]:
+        """
+        CO001: Obtener solicitudes disponibles para corredor
+        ✅ INCLUYE courier_id
+        """
+        
+        # Rollback preventivo
+        try:
+            self.db.rollback()
+        except:
+            pass
+        
+        try:
+            logger.info(f"📦 Buscando solicitudes disponibles para corredor")
+            
+            from sqlalchemy import func, case
+            
+            query = self.db.query(
+                TransferRequest,
+                User.first_name.label('warehouse_keeper_first_name'),
+                User.last_name.label('warehouse_keeper_last_name'),
+                Location.name.label('source_location_name'),
+                Location.address.label('source_address'),
+                Location.phone.label('source_phone'),
+                func.coalesce(Product.image_url, '').label('product_image')
+            ).outerjoin(
+                User, TransferRequest.warehouse_keeper_id == User.id
+            ).join(
+                Location, TransferRequest.source_location_id == Location.id
+            ).outerjoin(
+                Product,
+                and_(
+                    Product.reference_code == TransferRequest.sneaker_reference_code,
+                    Product.company_id == TransferRequest.company_id
+                )
+            ).filter(
+                TransferRequest.status == 'accepted',
+                TransferRequest.pickup_type == 'corredor',
+                TransferRequest.company_id == company_id
+            ).order_by(
+                case(
+                    (TransferRequest.purpose == 'cliente', 1),
+                    else_=2
+                ),
+                TransferRequest.accepted_at.asc()
+            )
+            
+            results = query.all()
+            
+            logger.info(f"✅ Encontradas {len(results)} solicitudes disponibles")
+            
+            requests = []
+            for row in results:
+                tr = row.TransferRequest
+                
+                # Etiquetas descriptivas para el corredor
+                inventory_type_label = {
+                    'pair': '📦 Par completo',
+                    'left_only': '👟← Pie IZQUIERDO',
+                    'right_only': '👟→ Pie DERECHO'
+                }.get(tr.inventory_type or 'pair', '❓ Desconocido')
+                
+                # Calcular prioridad
+                priority_score = 0.0
+                if tr.accepted_at:
+                    time_since_accepted = datetime.now() - tr.accepted_at
+                    priority_score = time_since_accepted.total_seconds() / 3600
+                
+                # Obtener ubicación destino
+                dest_location = self.db.query(Location).filter(
+                    Location.id == tr.destination_location_id
+                ).first()
+                
+                requests.append({
+                    'id': tr.id,
+                    'status': tr.status,
+                    'request_type': tr.request_type,
+                    'sneaker_reference_code': tr.sneaker_reference_code,
+                    'brand': tr.brand,
+                    'model': tr.model,
+                    'size': tr.size,
+                    'quantity': tr.quantity,
+                    
+                    # ✅ CRÍTICO: Incluir courier_id
+                    'courier_id': tr.courier_id,
+                    
+                    # Información de tipo de inventario
+                    'inventory_type': tr.inventory_type or 'pair',
+                    'inventory_type_label': inventory_type_label,
+                    'cargo_description': f"{tr.quantity} × {inventory_type_label} - {tr.brand} {tr.model} talla {tr.size}",
+                    
+                    'purpose': tr.purpose,
+                    'urgency': 'high' if tr.purpose == 'cliente' else 'normal',
+                    'priority_score': priority_score,
+                    'product_image': row.product_image,
+                    
+                    'transport_info': {
+                        'pickup_location': {
+                            'id': tr.source_location_id,
+                            'name': row.source_location_name,
+                            'address': row.source_address or 'Dirección no disponible',
+                            'phone': row.source_phone,
+                            'contact': f"{row.warehouse_keeper_first_name or ''} {row.warehouse_keeper_last_name or ''}".strip()
+                        },
+                        'delivery_location': {
+                            'id': tr.destination_location_id,
+                            'name': dest_location.name if dest_location else 'Desconocido',
+                            'address': dest_location.address if dest_location else 'Dirección no disponible',
+                            'phone': dest_location.phone if dest_location else None
+                        }
                     },
-                    'delivery_location': {
-                        'name': row.destination_location_name,
-                        'address': row.destination_address or 'Dirección no disponible',
-                        'contact': f"{row.requester_first_name} {row.requester_last_name}"
-                    },
-                    'route_context': "DEVOLUCIÓN: Producto regresa al origen" if row.request_type == 'return' else "TRANSFERENCIA: Producto va al destino"
-                },
-                'request_info': {
-                    'pickup_location': row.source_location_name,
-                    'pickup_address': row.source_address,
-                    'delivery_location': row.destination_location_name,
-                    'delivery_address': row.destination_address,
-                    'product_description': f"{row.brand} {row.model} - Talla {row.size}",
-                    'urgency': "Cliente presente" if row.purpose == 'cliente' else "Restock"
-                }
-            })
-        
-        return requests
+                    
+                    'estimated_pickup_time': tr.estimated_pickup_time,
+                    'action_required': 'accept',
+                    'status_description': 'Disponible para transporte'
+                })
+            
+            return requests
+            
+        except Exception as e:
+            logger.exception(f"❌ Error obteniendo solicitudes disponibles: {str(e)}")
+            try:
+                self.db.rollback()
+            except:
+                pass
+            return []
     
     def accept_courier_request(self, request_id: int, courier_id: int, estimated_time: int, notes: str, company_id: int) -> bool:
         """CO002: Aceptar solicitud como corredor con concurrencia - FILTRADO POR COMPANY_ID"""
@@ -288,6 +422,7 @@ class CourierRepository:
                 'estimated_pickup_time': transport.estimated_pickup_time,
                 'courier_notes': transport.courier_notes,
                 'pickup_notes': transport.pickup_notes,
+                'inventory_type': transport.inventory_type,
                 'source_location': {
                     'id': transport.source_location.id,
                     'name': transport.source_location.name,

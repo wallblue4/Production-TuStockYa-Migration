@@ -740,6 +740,7 @@ class ProductCreationError(BaseModel):
         }
 
 
+
 class VideoProductEntryDistributed(BaseModel):
     """
     Entrada de producto con video IA + distribución de inventario por ubicaciones
@@ -773,93 +774,106 @@ class VideoProductEntryDistributed(BaseModel):
         Reglas:
         1. Al menos una talla debe tener inventario
         2. Cada talla debe balancear izquierdos = derechos
-        3. No puede haber tallas duplicadas
         """
-        if not v:
+        if not v or len(v) == 0:
             raise ValueError("Debe especificar al menos una talla con distribución")
         
-        # Verificar tallas duplicadas
-        sizes_seen = set()
-        for size_dist in v:
-            if size_dist.size in sizes_seen:
-                raise ValueError(f"Talla duplicada: {size_dist.size}")
-            sizes_seen.add(size_dist.size)
-        
-        # Validar balance global
+        # Validar balance por talla
         for size_dist in v:
             if not size_dist.validate_global_balance():
                 raise ValueError(
-                    f"Talla {size_dist.size}: Desbalance detectado - "
-                    f"{size_dist.total_left_feet} izquierdos vs "
-                    f"{size_dist.total_right_feet} derechos"
+                    f"Talla {size_dist.size}: Desbalance detectado. "
+                    f"Izquierdos: {size_dist.total_left_feet}, "
+                    f"Derechos: {size_dist.total_right_feet}. "
+                    f"Deben ser iguales."
                 )
-        
-        # Validar que al menos una talla tenga inventario
-        total_shoes = sum(sd.total_shoes for sd in v)
-        if total_shoes == 0:
-            raise ValueError("Debe especificar al menos una unidad de inventario")
-        
-        if total_shoes > 5000:
-            raise ValueError("El total de zapatos no puede superar 5000 unidades")
         
         return v
     
-    @property
-    def total_pairs(self) -> int:
-        """Total de pares completos en toda la distribución"""
-        return sum(sd.total_pairs for sd in self.sizes_distribution)
+    # ========== PROPIEDADES CALCULADAS ==========
     
     @property
+    def total_pairs(self) -> int:
+        """Total de pares completos en todas las tallas"""
+        return sum(size_dist.total_pairs for size_dist in self.sizes_distribution)
+    
+    @property
+    def total_left_feet(self) -> int:
+        """Total de pies izquierdos en todas las tallas"""
+        return sum(size_dist.total_left_feet for size_dist in self.sizes_distribution)
+    
+    @property
+    def total_right_feet(self) -> int:
+        """Total de pies derechos en todas las tallas"""
+        return sum(size_dist.total_right_feet for size_dist in self.sizes_distribution)
+    
+    # ✅ AGREGAR ESTA PROPIEDAD:
+    @property
     def total_individual_feet(self) -> int:
-        """Total de pies individuales (izq + der)"""
-        total_left = sum(sd.total_left_feet for sd in self.sizes_distribution)
-        total_right = sum(sd.total_right_feet for sd in self.sizes_distribution)
-        return total_left + total_right
+        """Total de pies individuales (izquierdos + derechos)"""
+        return self.total_left_feet + self.total_right_feet
     
     @property
     def total_shoes(self) -> int:
-        """Total de zapatos (pares*2 + individuales)"""
-        return (self.total_pairs * 2) + self.total_individual_feet
+        """Total de zapatos (pares * 2 + individuales)"""
+        return (self.total_pairs * 2) + self.total_left_feet + self.total_right_feet
     
     @property
-    def locations_involved(self) -> set:
-        """IDs de todas las ubicaciones involucradas"""
+    def locations_involved(self) -> List[int]:
+        """Lista de location_ids involucrados en la distribución"""
         location_ids = set()
+        
         for size_dist in self.sizes_distribution:
+            # Agregar locations de pares
             for pair in size_dist.pairs:
                 location_ids.add(pair.location_id)
+            
+            # Agregar locations de pies izquierdos
             for left in size_dist.left_feet:
                 location_ids.add(left.location_id)
+            
+            # Agregar locations de pies derechos
             for right in size_dist.right_feet:
                 location_ids.add(right.location_id)
-        return location_ids
+        
+        return list(location_ids)
+    
+    @property
+    def sizes_list(self) -> List[str]:
+        """Lista de tallas incluidas"""
+        return [size_dist.size for size_dist in self.sizes_distribution]
+    
+    def get_summary_by_size(self) -> dict:
+        """
+        Resumen de distribución por talla
+        
+        Returns:
+            Dict con información por cada talla
+        """
+        summary = {}
+        
+        for size_dist in self.sizes_distribution:
+            summary[size_dist.size] = {
+                "pairs": size_dist.total_pairs,
+                "left_feet": size_dist.total_left_feet,
+                "right_feet": size_dist.total_right_feet,
+                "total_shoes": size_dist.total_shoes,
+                "is_balanced": size_dist.validate_global_balance()
+            }
+        
+        return summary
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "product_brand": "Nike",
                 "product_model": "Air Max 90",
-                "unit_price": 150000,
-                "box_price": 1350000,
-                "notes": "Lanzamiento nueva colección - Distribución especial",
+                "unit_price": 350000,
+                "box_price": 3150000,
+                "notes": "Nueva colección 2025",
                 "sizes_distribution": [
                     {
-                        "size": "42",
-                        "pairs": [
-                            {"location_id": 1, "quantity": 15, "notes": "Bodega principal"},
-                            {"location_id": 5, "quantity": 3, "notes": "Local VIP"}
-                        ],
-                        "left_feet": [
-                            {"location_id": 2, "quantity": 2, "notes": "Exhibición Local Norte"},
-                            {"location_id": 3, "quantity": 1, "notes": "Exhibición Local Sur"}
-                        ],
-                        "right_feet": [
-                            {"location_id": 4, "quantity": 2, "notes": "Exhibición Local Centro"},
-                            {"location_id": 6, "quantity": 1, "notes": "Exhibición Local Este"}
-                        ]
-                    },
-                    {
-                        "size": "43",
+                        "size": "39",
                         "pairs": [
                             {"location_id": 1, "quantity": 10}
                         ],
@@ -868,6 +882,18 @@ class VideoProductEntryDistributed(BaseModel):
                         ],
                         "right_feet": [
                             {"location_id": 3, "quantity": 1}
+                        ]
+                    },
+                    {
+                        "size": "42",
+                        "pairs": [
+                            {"location_id": 1, "quantity": 15}
+                        ],
+                        "left_feet": [
+                            {"location_id": 2, "quantity": 2}
+                        ],
+                        "right_feet": [
+                            {"location_id": 3, "quantity": 2}
                         ]
                     }
                 ]

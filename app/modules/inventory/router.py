@@ -4,8 +4,15 @@ from typing import List, Optional ,Literal
 
 from app.config.database import get_db
 from app.core.auth.dependencies import require_roles, get_current_company_id
+from .repository import InventoryRepository
 from .service import InventoryService
 from .schemas import ProductResponse, InventorySearchParams, InventoryByRoleParams, GroupedInventoryResponse, SimpleInventoryResponse, GlobalDistributionResponse
+from .schemas import (
+    ManualPairFormationRequest,
+    ManualPairFormationResponse,
+    FormableOpportunitiesRequest,
+    FormableOpportunitiesResponse
+)
 
 router = APIRouter()
 
@@ -361,6 +368,102 @@ async def find_opposite_foot(
         "total_quantity": sum(loc['quantity'] for loc in locations),
         "nearest_location": locations[0] if locations else None
     }
+
+@router.post("/form-pair", response_model=ManualPairFormationResponse)
+async def form_pair_manually(
+    request: ManualPairFormationRequest,
+    current_user = Depends(require_roles(["seller", "bodeguero", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
+    db: Session = Depends(get_db)
+):
+    """
+    🆕 Formar pares manualmente desde pies individuales
+    
+    **Casos de uso:**
+    - Vendedor tiene ambos pies pero no se formó par automáticamente
+    - Admin decide consolidar inventario
+    - Pies llegaron en momentos diferentes sin transferencia
+    
+    **Requisitos:**
+    - Ambos pies (izquierdo y derecho) deben estar en la misma ubicación
+    - Debe haber suficiente cantidad de ambos
+    
+    **Proceso:**
+    1. Valida disponibilidad de ambos pies
+    2. Resta de `left_only` y `right_only`
+    3. Suma a `pair`
+    4. Registra en historial de cambios
+    
+    **Ejemplo:**
+```json
+    {
+      "reference_code": "NK-AM90-BLK-001",
+      "size": "42",
+      "location_id": 2,
+      "quantity": 1,
+      "notes": "Cliente esperando - formar par ahora"
+    }
+```
+    
+    **Respuesta:**
+    - Confirma formación exitosa
+    - Muestra estado actualizado del inventario
+    - Indica cantidad de pies restantes
+    """
+    
+    service = InventoryService(db, current_company_id)
+    
+    result = await service.form_pair_manually(
+        request=request,
+        user_id=current_user.id
+    )
+    
+    return result
+
+
+@router.get("/formable-opportunities", response_model=FormableOpportunitiesResponse)
+async def get_formable_opportunities(
+    location_id: Optional[int] = Query(None, description="Filtrar por ubicación específica"),
+    min_pairs: int = Query(1, ge=1, description="Mínimo de pares formables para incluir"),
+    current_user = Depends(require_roles(["seller", "bodeguero", "administrador", "boss"])),
+    current_company_id: int = Depends(get_current_company_id),
+    db: Session = Depends(get_db)
+):
+    """
+    🆕 Obtener lista de oportunidades de formar pares
+    
+    **Funcionalidad:**
+    - Lista todos los productos que tienen ambos pies en la misma ubicación
+    - Calcula cuántos pares se pueden formar
+    - Estima el valor económico de formar esos pares
+    - Prioriza por cantidad y valor
+    
+    **Filtros:**
+    - `location_id`: Ver solo oportunidades en una ubicación específica
+    - `min_pairs`: Mostrar solo si se pueden formar N o más pares
+    
+    **Casos de uso:**
+    - Admin quiere ver todas las oportunidades de consolidación
+    - Vendedor consulta su local antes de solicitar transferencias
+    - Reporte de eficiencia de inventario
+    
+    **Respuesta incluye:**
+    - Lista ordenada por prioridad y valor
+    - Total de pares formables en el sistema
+    - Valor económico estimado total
+    """
+    
+    service = InventoryService(db, current_company_id)
+    
+    request_data = FormableOpportunitiesRequest(
+        location_id=location_id,
+        min_pairs=min_pairs
+    )
+    
+    result = await service.get_formable_opportunities(request_data)
+    
+    return result
+
 
 @router.get("/health")
 async def inventory_health():

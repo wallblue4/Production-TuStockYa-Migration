@@ -6,7 +6,9 @@ from app.config.database import get_db
 from app.core.auth.dependencies import require_roles
 from app.core.auth.dependencies import get_current_company_id
 from .service import TransfersService
-from .schemas import TransferRequestCreate, TransferRequestResponse, MyTransferRequestsResponse , ReturnRequestCreate, ReturnRequestResponse
+from .schemas import TransferRequestCreate, TransferRequestResponse, MyTransferRequestsResponse , ReturnRequestCreate, ReturnRequestResponse, SingleFootTransferResponse
+
+from app.shared.schemas.inventory_distribution import SingleFootTransferRequest
 
 router = APIRouter()
 
@@ -124,6 +126,59 @@ async def get_my_returns(
     
     return await service.get_my_returns(current_user.id, user_info, company_id)
 
+
+@router.post("/request-single-foot", response_model=SingleFootTransferResponse)
+async def request_single_foot_transfer(
+    request: SingleFootTransferRequest,
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    company_id: int = Depends(get_current_company_id),
+    db: Session = Depends(get_db)
+):
+    """
+    🆕 Solicitar transferencia de pie individual (izquierdo o derecho)
+    
+    **Casos de uso:**
+    - Enviar pie para exhibición en otro local
+    - Mover pie para formar par en ubicación con pie opuesto
+    - Rebalancear inventario entre ubicaciones
+    
+    **Validaciones automáticas:**
+    - Verifica disponibilidad del pie solicitado
+    - Detecta si existe pie opuesto en destino
+    - Sugiere auto-formación de par
+    - Calcula cantidad de pares que se pueden formar
+    
+    **Ejemplo de request:**
+```json
+    {
+      "source_location_id": 1,
+      "destination_location_id": 2,
+      "sneaker_reference_code": "NK-AM90-BLK-001",
+      "size": "42",
+      "foot_side": "left",
+      "quantity": 1,
+      "purpose": "pair_formation",
+      "pickup_type": "corredor",
+      "notes": "Cliente esperando en Local Centro"
+    }
+```
+    
+    **Respuesta incluye:**
+    - ID de transferencia creada
+    - Si hay pie opuesto disponible en destino
+    - Cantidad de pares que se formarán automáticamente
+    - Próximos pasos del proceso
+    """
+    
+    service = TransfersService(db)
+    
+    result = await service.create_single_foot_transfer(
+        request=request,
+        user_id=current_user.id,
+        company_id=company_id
+    )
+    
+    return result
 
 @router.get("/health")
 async def transfers_health():

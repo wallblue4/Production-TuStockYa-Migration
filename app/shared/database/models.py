@@ -502,6 +502,19 @@ class TransferRequest(Base):
     pickup_notes = Column(Text)
     request_type = Column(String(20), default='transfer')
     original_transfer_id = Column(Integer, ForeignKey('transfer_requests.id'))
+    inventory_type = Column(
+        Enum('pair', 'left_only', 'right_only', name='inventory_type_enum'),
+        default='pair',
+        nullable=False
+    )
+    
+    
+    auto_formed_pair_id = Column(
+        Integer, 
+        ForeignKey('transfer_requests.id'),
+        nullable=True,
+        comment="ID del transfer opuesto que formó par automáticamente"
+    )
     
     # Relationships
     requester = relationship("User", foreign_keys=[requester_id])

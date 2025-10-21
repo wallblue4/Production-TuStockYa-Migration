@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, date
 from typing import List, Optional, Dict, Any, Callable, Union, Tuple
 from fastapi import HTTPException, status, UploadFile
-from sqlalchemy import func 
+from sqlalchemy import func ,and_,or_
 from sqlalchemy.orm import Session
 from decimal import Decimal
 from app.shared.services.video_microservice_client import VideoMicroserviceClient
@@ -2185,7 +2185,7 @@ class AdminService:
             logger.info(f"✓ Ubicaciones requeridas: {video_entry.locations_involved}")
             
             # Verificar acceso a todas las ubicaciones
-            unauthorized_locations = video_entry.locations_involved - managed_location_ids
+            unauthorized_locations = set(video_entry.locations_involved) - managed_location_ids
             
             if unauthorized_locations:
                 logger.error(f"❌ Sin permisos para ubicaciones: {unauthorized_locations}")
@@ -2260,16 +2260,31 @@ class AdminService:
                 logger.info("\n" + "─" * 80)
                 logger.info("📸 PASO 3: Subiendo imagen de referencia a Cloudinary")
                 logger.info("─" * 80)
+                logger.info(f"   Archivo: {reference_image.filename}")
                 
                 try:
-                    image_url = await self._upload_reference_image(reference_image)
+                    # ✅ CORRECCIÓN 1: Definir temp_reference
+                    temp_reference = f"PROD_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{admin_user.id}"
+                    logger.info(f"   Referencia temporal: {temp_reference}")
+                    
+                    # ✅ CORRECCIÓN 2: Usar admin_user en lugar de admin
+                    image_url = await cloudinary_service.upload_product_reference_image(
+                        reference_image, 
+                        temp_reference, 
+                        admin_user.id  # ✅ Nombre correcto del parámetro
+                    )
+                    
                     logger.info(f"✅ Imagen subida exitosamente")
                     logger.info(f"   URL: {image_url}")
-                except Exception as e:
-                    logger.warning(f"⚠️  Error al subir imagen: {str(e)}")
+                    
+                except Exception as img_error:
+                    logger.warning(f"⚠️  Error al subir imagen: {str(img_error)}")
                     logger.warning("   Continuando sin imagen de referencia...")
+                    image_url = None
             else:
-                logger.info("\n📸 PASO 3: Sin imagen de referencia (opcional)")
+                logger.info("\n" + "─" * 80)
+                logger.info("📸 PASO 3: Sin imagen de referencia (opcional)")
+                logger.info("─" * 80)
             
             # ==================== PASO 4: CREAR PRODUCTO ====================
             logger.info("\n" + "─" * 80)
@@ -2585,90 +2600,50 @@ class AdminService:
         return list(locations_info.keys())[0]
 
 
-    def _generate_reference_code(self, brand: str, model: str) -> str:
-        """
-        Generar código de referencia único
+    # def _generate_reference_code(self, brand: str, model: str) -> str:
+    #     """
+    #     Generar código de referencia único
         
-        Formato: BRAND-MODEL-XXXX
-        Ejemplo: NIKE-AM90-1234
-        """
-        import random
-        import string
-        from unidecode import unidecode
+    #     Formato: BRAND-MODEL-XXXX
+    #     Ejemplo: NIKE-AM90-1234
+    #     """
+    #     import random
+    #     import string
+    #     from unidecode import unidecode
         
-        # Limpiar y normalizar brand
-        brand_clean = unidecode(brand or "PROD")
-        brand_part = ''.join(c for c in brand_clean if c.isalnum())[:4].upper()
-        if not brand_part:
-            brand_part = "PROD"
+    #     # Limpiar y normalizar brand
+    #     brand_clean = unidecode(brand or "PROD")
+    #     brand_part = ''.join(c for c in brand_clean if c.isalnum())[:4].upper()
+    #     if not brand_part:
+    #         brand_part = "PROD"
         
-        # Limpiar y normalizar model
-        model_clean = unidecode(model or "MODEL")
-        model_part = ''.join(c for c in model_clean if c.isalnum())[:4].upper()
-        if not model_part:
-            model_part = "MODL"
+    #     # Limpiar y normalizar model
+    #     model_clean = unidecode(model or "MODEL")
+    #     model_part = ''.join(c for c in model_clean if c.isalnum())[:4].upper()
+    #     if not model_part:
+    #         model_part = "MODL"
         
-        # Generar parte aleatoria
-        random_part = ''.join(random.choices(string.digits, k=4))
+    #     # Generar parte aleatoria
+    #     random_part = ''.join(random.choices(string.digits, k=4))
         
-        reference_code = f"{brand_part}-{model_part}-{random_part}"
+    #     reference_code = f"{brand_part}-{model_part}-{random_part}"
         
-        # Verificar unicidad
-        exists = self.db.query(Product).filter(
-            and_(
-                Product.reference_code == reference_code,
-                Product.company_id == self.company_id
-            )
-        ).first()
+    #     # Verificar unicidad
+    #     exists = self.db.query(Product).filter(
+    #         and_(
+    #             Product.reference_code == reference_code,
+    #             Product.company_id == self.company_id
+    #         )
+    #     ).first()
         
-        if exists:
-            # Si existe, regenerar recursivamente
-            return self._generate_reference_code(brand, model)
+    #     if exists:
+    #         # Si existe, regenerar recursivamente
+    #         return self._generate_reference_code(brand, model)
         
-        return reference_code
+    #     return reference_code
 
 
-    async def _upload_reference_image(self, image_file: UploadFile) -> str:
-        """
-        Subir imagen de referencia a Cloudinary
-        
-        Returns:
-            URL de la imagen subida
-        """
-        import cloudinary
-        import cloudinary.uploader
-        
-        try:
-            # Configurar Cloudinary
-            cloudinary.config(
-                cloud_name=settings.CLOUDINARY_CLOUD_NAME,
-                api_key=settings.CLOUDINARY_API_KEY,
-                api_secret=settings.CLOUDINARY_API_SECRET
-            )
-            
-            # Leer contenido de la imagen
-            await image_file.seek(0)
-            image_content = await image_file.read()
-            
-            # Subir a Cloudinary
-            result = cloudinary.uploader.upload(
-                image_content,
-                folder="product_references",
-                resource_type="image",
-                format="jpg",
-                transformation=[
-                    {'width': 800, 'height': 800, 'crop': 'limit'},
-                    {'quality': 'auto:good'}
-                ]
-            )
-            
-            return result['secure_url']
-        
-        except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error subiendo imagen a Cloudinary: {str(e)}")
-            raise Exception(f"Error al subir imagen: {str(e)}")
-
+    
 
 # ==================== DECORADORES ====================
 

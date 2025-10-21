@@ -15,6 +15,12 @@ class InventoryTypeEnum(str, Enum):
     LEFT_ONLY = "left_only"
     RIGHT_ONLY = "right_only"
 
+class FootSide(str, Enum):
+    """Lado del pie"""
+    left = "left"
+    right = "right"
+
+
 
 class LocationQuantity(BaseModel):
     """
@@ -237,3 +243,97 @@ class InventoryDistributionSummary(BaseModel):
                 ]
             }
         }
+class SingleFootTransferRequest(BaseModel):
+    """
+    Request especializado para transferir pies individuales
+    
+    Casos de uso:
+    - Mover pie para exhibición
+    - Enviar pie para formar par en otro local
+    - Rebalancear inventario entre ubicaciones
+    """
+    source_location_id: int = Field(..., description="Ubicación origen")
+    destination_location_id: int = Field(..., description="Ubicación destino")
+    sneaker_reference_code: str = Field(..., description="Código de producto")
+    size: str = Field(..., description="Talla")
+    foot_side: FootSide = Field(..., description="Pie izquierdo o derecho")
+    quantity: int = Field(1, ge=1, description="Cantidad de pies a transferir")
+    purpose: Literal['exhibition', 'pair_formation', 'rebalancing'] = Field(
+        ...,
+        description="Propósito de la transferencia"
+    )
+    pickup_type: str = Field(..., description="Tipo de recogida: vendedor, corredor")
+    notes: Optional[str] = Field(None, max_length=500)
+    
+    @property
+    def inventory_type(self) -> str:
+        """Convertir foot_side a inventory_type"""
+        return 'left_only' if self.foot_side == FootSide.left else 'right_only'
+    
+    @property
+    def brand(self) -> str:
+        """Extraer marca del código de referencia"""
+        # Asumiendo formato: BRAND-MODEL-COLOR-NUMBER
+        parts = self.sneaker_reference_code.split('-')
+        return parts[0] if parts else ""
+    
+    @property
+    def model(self) -> str:
+        """Extraer modelo del código de referencia"""
+        parts = self.sneaker_reference_code.split('-')
+        return '-'.join(parts[1:-2]) if len(parts) > 2 else ""
+
+
+class PairFormationResult(BaseModel):
+    """
+    Resultado de la formación automática de pares
+    """
+    formed: bool = Field(..., description="Si se formó un par")
+    pair_product_size_id: Optional[int] = Field(None, description="ID del ProductSize pair creado")
+    left_transfer_id: Optional[int] = Field(None, description="ID del transfer izquierdo")
+    right_transfer_id: Optional[int] = Field(None, description="ID del transfer derecho")
+    location_name: str = Field(..., description="Ubicación donde se formó")
+    quantity_formed: int = Field(..., description="Cantidad de pares formados")
+    remaining_left: int = Field(0, description="Pies izquierdos restantes")
+    remaining_right: int = Field(0, description="Pies derechos restantes")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "formed": True,
+                "pair_product_size_id": 456,
+                "left_transfer_id": 123,
+                "right_transfer_id": 124,
+                "location_name": "Local Centro",
+                "quantity_formed": 1,
+                "remaining_left": 0,
+                "remaining_right": 0
+            }
+        }
+
+
+class TransferSuggestion(BaseModel):
+    """
+    Sugerencia inteligente para completar pares
+    """
+    from_location: str
+    from_location_id: int
+    to_location: str
+    to_location_id: int
+    foot_needed: FootSide
+    quantity_available: int
+    priority: Literal['high', 'medium', 'low']
+    reason: str
+    estimated_time: Optional[str] = None
+
+
+class OppositeFootInfo(BaseModel):
+    """
+    Información sobre el pie opuesto disponible
+    """
+    exists: bool
+    product_size_id: Optional[int] = None
+    inventory_type: Optional[InventoryTypeEnum] = None
+    quantity: int = 0
+    location_name: Optional[str] = None
+    can_form_pairs: bool = False

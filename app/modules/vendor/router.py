@@ -101,9 +101,9 @@ async def confirm_reception(
     from app.shared.database.models import TransferRequest
     from app.modules.transfers_new.service import TransfersService
     
-    transfer_service = TransfersService(db)
-    return await transfer_service.confirm_reception(
-        request_id, received_quantity, condition_ok, notes, current_user, company_id
+    service = VendorService(db,company_id)
+    return await service.confirm_reception(
+        request_id, received_quantity, condition_ok, notes, current_user.id
     )
 
 @router.get("/my-pickup-assignments")

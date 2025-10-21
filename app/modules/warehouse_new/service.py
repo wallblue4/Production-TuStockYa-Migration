@@ -1,5 +1,5 @@
 # app/modules/warehouse_new/service.py
-from typing import Dict, Any
+from typing import Dict, Any ,Optional ,Literal
 from datetime import datetime
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, Query
@@ -11,7 +11,10 @@ from .schemas import (
     WarehouseRequestAcceptance, CourierDelivery, 
     PendingRequestsResponse, AcceptedRequestsResponse, InventoryByLocationResponse ,VendorDelivery
 )
-from app.shared.database.models import TransferRequest
+
+from app.shared.schemas.inventory_distribution import PairFormationResult
+
+from app.shared.database.models import TransferRequest , ProductSize , Location, Product
 
 from app.modules.transfers_new.schemas import ReturnReceptionConfirmation
 
@@ -311,3 +314,338 @@ class WarehouseService:
             raise HTTPException(400, detail=str(e))
         except RuntimeError as e:
             raise HTTPException(500, detail=str(e))
+
+    async def confirm_delivery(
+        self,
+        confirmation: ReturnReceptionConfirmation,
+        receiver_id: int
+    ) -> Dict[str, Any]:
+        """
+        Confirmar recepción de transferencia
+        ✅ MEJORADO: Ahora intenta formar pares automáticamente
+        """
+        
+        transfer_id = confirmation.transfer_request_id
+        received_quantity = confirmation.received_quantity
+        condition_ok = confirmation.condition_ok
+        notes = confirmation.notes
+        
+        try:
+            # Validar que la solicitud existe y está en tránsito
+            managed_location = self.repository.get_managed_location(receiver_id, self.company_id)
+            
+            transfer = self.repository.get_transfer_by_id(transfer_id, self.company_id)
+            
+            if not transfer:
+                raise HTTPException(404, "Transferencia no encontrada")
+            
+            if transfer.status != "in_transit":
+                raise HTTPException(
+                    400, 
+                    f"La transferencia debe estar 'in_transit'. Estado actual: {transfer.status}"
+                )
+            
+            # Validar destino
+            if transfer.destination_location_id != managed_location.id:
+                raise HTTPException(403, "No autorizado para confirmar esta entrega")
+            
+            logger.info(f"📦 Confirmando recepción - Transfer ID: {transfer_id}")
+            logger.info(f"   Cantidad recibida: {received_quantity}")
+            logger.info(f"   Tipo inventario: {transfer.inventory_type}")
+            
+            # Actualizar estado de transferencia
+            transfer.status = "completed"
+            transfer.delivered_at = datetime.now()
+            transfer.confirmed_reception_at = datetime.now()
+            transfer.received_quantity = received_quantity
+            transfer.reception_notes = notes
+            
+            # ✅ ACTUALIZAR INVENTARIO SEGÚN TIPO
+            if condition_ok:
+                logger.info("📊 Actualizando inventario...")
+                
+                product = self.db.query(Product).filter(
+                    and_(
+                        Product.reference_code == transfer.sneaker_reference_code,
+                        Product.company_id == self.company_id
+                    )
+                ).first()
+                
+                if product:
+                    # Buscar o crear ProductSize con el inventory_type correcto
+                    product_size = self.db.query(ProductSize).filter(
+                        and_(
+                            ProductSize.product_id == product.id,
+                            ProductSize.size == transfer.size,
+                            ProductSize.location_name == managed_location.name,
+                            ProductSize.inventory_type == transfer.inventory_type,  # ✅ FILTRAR POR TIPO
+                            ProductSize.company_id == self.company_id
+                        )
+                    ).first()
+                    
+                    if product_size:
+                        product_size.quantity += received_quantity
+                        logger.info(f"   ✅ Inventario actualizado: +{received_quantity} {transfer.inventory_type}")
+                    else:
+                        # Crear nuevo ProductSize con el tipo correcto
+                        product_size = ProductSize(
+                            product_id=product.id,
+                            size=transfer.size,
+                            quantity=received_quantity,
+                            inventory_type=transfer.inventory_type,  # ✅ TIPO CORRECTO
+                            location_name=managed_location.name,
+                            company_id=self.company_id
+                        )
+                        self.db.add(product_size)
+                        logger.info(f"   ✅ Nuevo ProductSize creado: {received_quantity} {transfer.inventory_type}")
+            
+            self.db.commit()
+            
+            # ✅ NUEVO: INTENTAR AUTO-FORMACIÓN DE PARES
+            pair_formation_result = None
+            
+            if transfer.inventory_type in ['left_only', 'right_only'] and condition_ok:
+                logger.info("🔍 Verificando si se puede formar par automáticamente...")
+                pair_formation_result = await self._attempt_pair_formation(
+                    transfer=transfer,
+                    receiver_id=receiver_id
+                )
+            
+            logger.info("✅ Recepción confirmada - Inventario actualizado")
+            
+            return {
+                "success": True,
+                "message": "Recepción confirmada - Inventario actualizado automáticamente",
+                "request_id": transfer_id,
+                "received_quantity": received_quantity,
+                "inventory_type": transfer.inventory_type,
+                "inventory_updated": condition_ok,
+                "confirmed_at": datetime.now().isoformat(),
+                "pair_formation": pair_formation_result  # ✅ NUEVO
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("❌ Error confirmando recepción")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error confirmando recepción: {str(e)}"
+            )
+    
+    
+    # ========== NUEVO MÉTODO: INTENTAR FORMACIÓN DE PAR ==========
+    async def _attempt_pair_formation(
+        self,
+        transfer: TransferRequest,
+        receiver_id: int
+    ) -> Optional[PairFormationResult]:
+        """
+        🆕 Intentar formar par automáticamente al recibir un pie
+        
+        Proceso:
+        1. Buscar pie opuesto en la misma ubicación
+        2. Si existe, formar par automáticamente
+        3. Actualizar inventarios
+        4. Registrar en historial
+        """
+        
+        try:
+            logger.info(f"🔍 Buscando pie opuesto para auto-formación...")
+            logger.info(f"   Producto: {transfer.sneaker_reference_code}")
+            logger.info(f"   Talla: {transfer.size}")
+            logger.info(f"   Pie recibido: {transfer.inventory_type}")
+            
+            # Buscar ubicación destino
+            destination_location = self.db.query(Location).filter(
+                Location.id == transfer.destination_location_id
+            ).first()
+            
+            if not destination_location:
+                logger.warning("❌ Ubicación destino no encontrada")
+                return None
+            
+            # Buscar producto
+            product = self.db.query(Product).filter(
+                and_(
+                    Product.reference_code == transfer.sneaker_reference_code,
+                    Product.company_id == self.company_id
+                )
+            ).first()
+            
+            if not product:
+                logger.warning("❌ Producto no encontrado")
+                return None
+            
+            # Determinar qué pie buscar
+            opposite_type = 'right_only' if transfer.inventory_type == 'left_only' else 'left_only'
+            
+            # Buscar pie opuesto
+            opposite_foot = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product.id,
+                    ProductSize.size == transfer.size,
+                    ProductSize.location_name == destination_location.name,
+                    ProductSize.inventory_type == opposite_type,
+                    ProductSize.quantity > 0,
+                    ProductSize.company_id == self.company_id
+                )
+            ).first()
+            
+            if not opposite_foot:
+                logger.info(f"ℹ️ No se encontró pie opuesto ({opposite_type}) - no se puede formar par")
+                return PairFormationResult(
+                    formed=False,
+                    location_name=destination_location.name,
+                    quantity_formed=0
+                )
+            
+            logger.info(f"✅ Pie opuesto encontrado: {opposite_foot.quantity} disponible(s)")
+            
+            # Calcular cuántos pares se pueden formar
+            received_foot = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product.id,
+                    ProductSize.size == transfer.size,
+                    ProductSize.location_name == destination_location.name,
+                    ProductSize.inventory_type == transfer.inventory_type,
+                    ProductSize.company_id == self.company_id
+                )
+            ).first()
+            
+            if not received_foot:
+                logger.warning("❌ No se encontró el pie recibido en inventario")
+                return None
+            
+            quantity_formable = min(received_foot.quantity, opposite_foot.quantity)
+            
+            if quantity_formable == 0:
+                logger.info("ℹ️ No hay cantidad suficiente para formar pares")
+                return PairFormationResult(
+                    formed=False,
+                    location_name=destination_location.name,
+                    quantity_formed=0
+                )
+            
+            logger.info(f"🎉 Formando {quantity_formable} par(es) automáticamente...")
+            
+            # Formar pares
+            result = await self._form_pair_locally(
+                product_id=product.id,
+                size=transfer.size,
+                location_name=destination_location.name,
+                quantity=quantity_formable,
+                left_foot=received_foot if transfer.inventory_type == 'left_only' else opposite_foot,
+                right_foot=opposite_foot if transfer.inventory_type == 'left_only' else received_foot,
+                transfer_id=transfer.id
+            )
+            
+            return result
+            
+        except Exception as e:
+            logger.exception(f"❌ Error intentando formar par: {str(e)}")
+            return None
+    
+    
+    # ========== NUEVO MÉTODO: FORMAR PAR LOCALMENTE ==========
+    async def _form_pair_locally(
+        self,
+        product_id: int,
+        size: str,
+        location_name: str,
+        quantity: int,
+        left_foot: ProductSize,
+        right_foot: ProductSize,
+        transfer_id: Optional[int] = None
+    ) -> PairFormationResult:
+        """
+        🆕 Formar pares desde pies individuales en la misma ubicación
+        
+        Proceso:
+        1. Restar de left_only
+        2. Restar de right_only
+        3. Sumar/crear pair
+        4. Registrar cambio en historial
+        """
+        
+        try:
+            logger.info(f"🔨 Formando {quantity} par(es)...")
+            logger.info(f"   Izquierdos disponibles: {left_foot.quantity}")
+            logger.info(f"   Derechos disponibles: {right_foot.quantity}")
+            
+            # Validar cantidades
+            if left_foot.quantity < quantity or right_foot.quantity < quantity:
+                raise ValueError(
+                    f"Cantidades insuficientes para formar {quantity} par(es). "
+                    f"Izq: {left_foot.quantity}, Der: {right_foot.quantity}"
+                )
+            
+            # 1. Restar de pies individuales
+            left_foot.quantity -= quantity
+            right_foot.quantity -= quantity
+            
+            logger.info(f"   ✅ Restado de pies individuales")
+            logger.info(f"      Izquierdos restantes: {left_foot.quantity}")
+            logger.info(f"      Derechos restantes: {right_foot.quantity}")
+            
+            # 2. Buscar o crear ProductSize de tipo 'pair'
+            pair = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product_id,
+                    ProductSize.size == size,
+                    ProductSize.location_name == location_name,
+                    ProductSize.inventory_type == 'pair',
+                    ProductSize.company_id == self.company_id
+                )
+            ).first()
+            
+            if pair:
+                pair.quantity += quantity
+                logger.info(f"   ✅ Pares actualizados: {pair.quantity}")
+            else:
+                pair = ProductSize(
+                    product_id=product_id,
+                    size=size,
+                    quantity=quantity,
+                    inventory_type='pair',
+                    location_name=location_name,
+                    company_id=self.company_id
+                )
+                self.db.add(pair)
+                logger.info(f"   ✅ Nuevo ProductSize 'pair' creado: {quantity}")
+            
+            # 3. Registrar en historial
+            from app.shared.database.models import InventoryChange
+            
+            change = InventoryChange(
+                product_id=product_id,
+                change_type='pair_formation',
+                quantity_before=0,
+                quantity_after=quantity,
+                user_id=1,  # Sistema
+                company_id=self.company_id,
+                notes=f"Par formado automáticamente al recibir transfer {transfer_id}. "
+                      f"Formados: {quantity} par(es) desde pies individuales en {location_name}"
+            )
+            self.db.add(change)
+            
+            self.db.commit()
+            
+            logger.info(f"🎉 ¡PAR FORMADO EXITOSAMENTE!")
+            logger.info(f"   Cantidad: {quantity} par(es)")
+            logger.info(f"   Ubicación: {location_name}")
+            
+            return PairFormationResult(
+                formed=True,
+                pair_product_size_id=pair.id,
+                left_transfer_id=transfer_id if left_foot.inventory_type == 'left_only' else None,
+                right_transfer_id=transfer_id if right_foot.inventory_type == 'right_only' else None,
+                location_name=location_name,
+                quantity_formed=quantity,
+                remaining_left=left_foot.quantity,
+                remaining_right=right_foot.quantity
+            )
+            
+        except Exception as e:
+            logger.exception(f"❌ Error formando par: {str(e)}")
+            raise

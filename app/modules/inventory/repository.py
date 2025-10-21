@@ -574,3 +574,21 @@ class InventoryRepository:
         )
         
         return opposite_locations
+
+    def get_product_by_reference(self, reference_code: str, company_id: int) -> Optional[Product]:
+        """
+        Obtener producto por código de referencia
+        
+        Args:
+            reference_code: Código de referencia del producto
+            company_id: ID de la compañía
+        
+        Returns:
+            Product o None si no existe
+        """
+        return self.db.query(Product).filter(
+            and_(
+                Product.reference_code == reference_code,
+                Product.company_id == company_id
+            )
+        ).first()
