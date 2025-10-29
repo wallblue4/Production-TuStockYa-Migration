@@ -44,14 +44,15 @@ class VideoProcessingService:
         product_model: Optional[str] = None,
         expected_sizes: Optional[str] = None,
         notes: Optional[str] = None,
-        priority: str = "normal"
+        priority: str = "normal",
+        save_locally: bool = False  # 🆕 NUEVO PARÁMETRO
     ) -> VideoJobResponse:
         """
         Crear job y procesar video con IA
         
         Pasos:
         1. Validar video
-        2. Guardar video temporalmente
+        2. Guardar video temporalmente (OPCIONAL - según save_locally)
         3. Crear job en BD
         4. Enviar a microservicio de IA
         5. Actualizar estado
@@ -66,10 +67,12 @@ class VideoProcessingService:
             expected_sizes: Tallas esperadas
             notes: Notas adicionales
             priority: Prioridad del procesamiento
+            save_locally: Si True, guarda video localmente. Si False, solo envía al microservicio
         
         Returns:
             VideoJobResponse con detalles del job creado
         """
+
         
         start_time = datetime.now()
         logger.info(f"🎬 Iniciando procesamiento de video")
@@ -77,6 +80,7 @@ class VideoProcessingService:
         logger.info(f"   Archivo: {video_file.filename}")
         logger.info(f"   Tamaño: {video_file.size} bytes")
         logger.info(f"   Bodega: {warehouse_location_id}")
+        logger.info(f"   💾 Guardar localmente: {save_locally}")  # 🆕
         
         temp_video_path = None
         
@@ -84,10 +88,14 @@ class VideoProcessingService:
             # Paso 1: Validar video
             self._validate_video(video_file)
             
-            # Paso 2: Guardar video temporalmente
-            logger.info("💾 Guardando video temporalmente...")
-            temp_video_path = await self._save_video_temp(video_file)
-            logger.info(f"   ✅ Video guardado en: {temp_video_path}")
+            # Paso 2: Guardar video temporalmente (CONDICIONAL)
+            if save_locally:  # 🆕 CONDICIÓN
+                logger.info("💾 Guardando video temporalmente...")
+                temp_video_path = await self._save_video_temp(video_file)
+                logger.info(f"   ✅ Video guardado en: {temp_video_path}")
+            else:
+                logger.info("⚡ Modo directo: NO se guardará el video localmente")
+                temp_video_path = "Video is no located"  # No hay path local
             
             # Paso 3: Crear job en BD
             logger.info("📝 Creando job en base de datos...")
@@ -96,7 +104,7 @@ class VideoProcessingService:
                 company_id=self.company_id,
                 user_id=user_id,
                 video_filename=video_file.filename,
-                video_path=str(temp_video_path),
+                video_path=str(temp_video_path) if temp_video_path else None,  # 🆕 NULL si no se guardó
                 file_size=video_file.size,
                 warehouse_location_id=warehouse_location_id,
                 estimated_quantity=estimated_quantity,
@@ -117,6 +125,10 @@ class VideoProcessingService:
                 self.repository.update_status(job.id, "processing")
                 self.db.commit()
                 
+                # 🆕 Si no guardamos localmente, resetear el seek del archivo
+                if not save_locally:
+                    await video_file.seek(0)
+                
                 # Preparar metadata
                 metadata = {
                     "job_db_id": job.id,
@@ -127,7 +139,7 @@ class VideoProcessingService:
                     "product_model": product_model,
                     "expected_sizes": expected_sizes,
                     "notes": notes,
-                    "processing_mode": "direct_with_training"
+                    "processing_mode": "direct_without_storage" if not save_locally else "direct_with_training"  # 🆕
                 }
                 
                 # Callback URL
@@ -157,28 +169,45 @@ class VideoProcessingService:
             except Exception as e:
                 logger.error(f"❌ Error al enviar al microservicio: {str(e)}")
                 
-                # Actualizar estado a failed
+                # Actualizar job con error
                 self.repository.update_status(
                     job.id,
                     "failed",
-                    error_message=f"Error al enviar al microservicio: {str(e)}"
+                    error_message=str(e)
                 )
                 self.db.commit()
                 
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Error al procesar video con IA: {str(e)}"
+                    detail=f"Error procesando video: {str(e)}"
                 )
             
-            # Paso 5: Retornar respuesta
-            return self._build_job_response(job)
+            # Construir y retornar respuesta
+            processing_time = (datetime.now() - start_time).total_seconds()
+            
+            return self._build_job_response(
+                job,
+                processed_by_name=None,
+                warehouse_name=None
+            )
         
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"❌ Error inesperado: {str(e)}")
-            logger.exception(e)
-            raise HTTPException(500, f"Error al procesar video: {str(e)}")
+            logger.error(f"❌ Error general: {str(e)}")
+            
+            # Limpiar video temporal si existe
+            if temp_video_path and temp_video_path.exists():
+                try:
+                    temp_video_path.unlink()
+                    logger.info(f"🗑️  Video temporal eliminado: {temp_video_path}")
+                except Exception as cleanup_error:
+                    logger.warning(f"⚠️  No se pudo eliminar video temporal: {cleanup_error}")
+            
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error procesando video: {str(e)}"
+            )
     
     async def handle_callback(
         self,

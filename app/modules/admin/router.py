@@ -56,7 +56,7 @@ async def create_user(
     **Validaciones:**
     - Email único en el sistema
     - Vendedores solo en locales (type='local')
-    - Bodegueros solo en bodegas (type='bodega')
+    - Bodegueros en bodegas y locales (type='bodega' o 'local')
     - Corredores pueden no tener ubicación específica
     """
     service = AdminService(db, current_company_id)
@@ -142,7 +142,7 @@ async def get_available_locations_for_user_creation(
         if role == UserRole.VENDEDOR:
             managed_locations = [loc for loc in managed_locations if loc.type == "local"]
         elif role == UserRole.BODEGUERO:
-            managed_locations = [loc for loc in managed_locations if loc.type == "bodega"]
+            managed_locations = [loc for loc in managed_locations if loc.type in ["bodega", "local"]]
         # Corredores pueden ir a cualquier tipo de ubicación
     
     return [
@@ -180,7 +180,7 @@ async def update_user(
     **Casos de uso:**
     - Cambiar nombre/información personal del usuario
     - Mover vendedor de un local a otro (ambos bajo control del admin)
-    - Mover bodeguero entre bodegas gestionadas
+    - Mover bodeguero entre bodegas y locales gestionados
     - Activar/desactivar usuario
     """
     service = AdminService(db, current_company_id)
@@ -198,7 +198,7 @@ async def assign_user_to_location(
 ):
     """
     AD005: Asignar vendedores a locales específicos
-    AD006: Asignar bodegueros a bodegas específicas
+    AD006: Asignar bodegueros a bodegas y locales específicos
     
     **VALIDACIONES DE PERMISOS AGREGADAS:**
     - Solo puede asignar usuarios que estén en ubicaciones bajo su control
@@ -214,14 +214,14 @@ async def assign_user_to_location(
     
     **Casos de uso válidos:**
     - Admin mueve vendedor entre sus locales asignados
-    - Admin mueve bodeguero entre sus bodegas
+    - Admin mueve bodeguero entre sus bodegas y locales
     - BOSS redistribuye personal entre cualquier ubicación
     - Asignar usuario recién creado a ubicación específica
     
     **Casos que fallarán:**
     - Admin intenta mover usuario de otro admin
     - Admin intenta asignar a ubicación no controlada
-    - Intentar asignar vendedor a bodega o bodeguero a local
+    - Intentar asignar vendedor a bodega (bodegueros ya pueden ir a locales)
     """
     service = AdminService(db, current_company_id)
     return await service.assign_user_to_location(assignment, current_user)

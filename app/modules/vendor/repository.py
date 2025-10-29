@@ -182,7 +182,8 @@ class VendorRepository:
                 TransferRequest.requester_id == user_id,
                 TransferRequest.company_id == company_id,
                 TransferRequest.status != 'completed',
-                TransferRequest.status != 'cancelled'
+                TransferRequest.status != 'cancelled',
+                TransferRequest.status != 'selled'
             )
         ).order_by(TransferRequest.requested_at.desc()).all()
         
@@ -647,3 +648,111 @@ class VendorRepository:
             logger.exception("❌ Error confirmando entrega vendedor")
             self.db.rollback()
             raise RuntimeError(f"Error procesando entrega: {str(e)}")
+
+    def validate_transfer_for_sale(
+        self,
+        request_id: int,
+        seller_id: int,
+        company_id: int
+    ) -> Dict[str, Any]:
+        """
+        Validar que la transferencia pueda ser vendida
+        
+        Validaciones:
+        - Existe la transferencia
+        - Pertenece a la empresa correcta
+        - Es del vendedor correcto
+        - Status = 'completed'
+        - No ha sido vendida antes
+        """
+        try:
+            transfer = self.db.query(TransferRequest).filter(
+                and_(
+                    TransferRequest.id == request_id,
+                    TransferRequest.company_id == company_id
+                )
+            ).first()
+            
+            if not transfer:
+                return {
+                    "valid": False,
+                    "error": f"Transferencia #{request_id} no encontrada"
+                }
+            
+            # Validar que sea del vendedor que la solicitó
+            if transfer.requester_id != seller_id:
+                return {
+                    "valid": False,
+                    "error": "Esta transferencia no te pertenece"
+                }
+            
+            # Validar status
+            if transfer.status != 'completed':
+                return {
+                    "valid": False,
+                    "error": f"La transferencia debe estar 'completed' (actual: '{transfer.status}')"
+                }
+            
+            logger.info(f"✅ Transferencia #{request_id} validada para venta")
+            
+            return {
+                "valid": True,
+                "transfer": transfer
+            }
+            
+        except Exception as e:
+            logger.exception("Error validando transferencia")
+            return {
+                "valid": False,
+                "error": f"Error de validación: {str(e)}"
+            }
+
+    def mark_transfer_as_selled(
+        self,
+        request_id: int,
+        sale_id: int,
+        company_id: int
+    ) -> bool:
+        """
+        Marcar transferencia como vendida
+        
+        Actualiza:
+        - status -> 'selled'
+        - Añade nota con ID de venta
+        - Timestamp de venta
+        """
+        try:
+            transfer = self.db.query(TransferRequest).filter(
+                and_(
+                    TransferRequest.id == request_id,
+                    TransferRequest.company_id == company_id
+                )
+            ).first()
+            
+            if not transfer:
+                raise ValueError(f"Transferencia #{request_id} no encontrada")
+            
+            # Actualizar status
+            transfer.status = 'selled'
+            
+            # Agregar nota
+            sale_note = (
+                f"\n\n═══ PRODUCTO VENDIDO ═══\n"
+                f"Venta ID: {sale_id}\n"
+                f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Status: Producto vendido al cliente final\n"
+                f"═══════════════════════════"
+            )
+            
+            transfer.notes = (transfer.notes or '') + sale_note
+            
+            self.db.commit()
+            
+            logger.info(f"✅ Transferencia #{request_id} marcada como 'selled' (Venta #{sale_id})")
+            
+            return True
+            
+        except Exception as e:
+            logger.exception("Error marcando transferencia como vendida")
+            self.db.rollback()
+            raise

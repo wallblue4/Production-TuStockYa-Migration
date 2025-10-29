@@ -710,7 +710,7 @@ async def get_company_boss(
     **Permisos:** Solo superadmin
     """
     service = SuperadminService(db)
-    company = service.repository.get_company(company_id)
+    company = await service.get_company(company_id)
     
     if not company:
         raise HTTPException(

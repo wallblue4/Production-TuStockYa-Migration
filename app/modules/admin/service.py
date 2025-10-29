@@ -96,10 +96,10 @@ class AdminService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Vendedores deben asignarse a locales"
                 )
-            elif user_data.role == UserRole.BODEGUERO and location.type != "bodega":
+            elif user_data.role == UserRole.BODEGUERO and location.type not in ["bodega", "local"]:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Bodegueros deben asignarse a bodegas"
+                    detail="Bodegueros pueden asignarse a bodegas o locales"
                 )
         
         # ====== TRANSACCIÓN ÚNICA PARA CREAR USUARIO Y ASIGNACIÓN ======
@@ -497,10 +497,10 @@ class AdminService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Vendedores solo pueden asignarse a locales"
                 )
-            elif user.role == "bodeguero" and new_location.type != "bodega":
+            elif user.role == "bodeguero" and new_location.type not in ["bodega", "local"]:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Bodegueros solo pueden asignarse a bodegas"
+                    detail="Bodegueros pueden asignarse a bodegas o locales"
                 )
         
         # ====== REALIZAR ACTUALIZACIÓN ======
@@ -703,11 +703,11 @@ class AdminService:
                 detail=f"No se puede asignar vendedor {user.full_name} a {location.name} "
                     f"porque es de tipo '{location.type}'. Vendedores solo pueden ir a locales."
             )
-        elif user.role == "bodeguero" and location.type != "bodega":
+        elif user.role == "bodeguero" and location.type not in ["bodega", "local"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"No se puede asignar bodeguero {user.full_name} a {location.name} "
-                    f"porque es de tipo '{location.type}'. Bodegueros solo pueden ir a bodegas."
+                    f"porque es de tipo '{location.type}'. Bodegueros pueden ir a bodegas o locales."
             )
         
         # ====== REALIZAR ASIGNACIÓN ======

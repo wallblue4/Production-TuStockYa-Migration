@@ -78,6 +78,7 @@ class SuperadminService:
             name=company.name,
             subdomain=company.subdomain,
             legal_name=company.legal_name,
+            phone=company.phone,
             tax_id=company.tax_id,
             email=company.email,
             subscription_plan=company.subscription_plan,
@@ -136,7 +137,7 @@ class SuperadminService:
             email=company_data.email,
             phone=company_data.phone,
             subscription_plan=company_data.subscription_plan,
-            subscription_status="trial",  # Iniciar en trial
+            subscription_status=company_data.subscription_plan,  # Iniciar en trial
             subscription_started_at=datetime.utcnow(),
             subscription_ends_at=company_data.subscription_ends_at,
             max_locations=company_data.max_locations,
@@ -568,7 +569,7 @@ class SuperadminService:
         """
         
         # 1. Verificar que la empresa existe
-        company = self.repository.get_company(company_id)
+        company = await self.get_company(company_id)
         if not company:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -637,7 +638,7 @@ class SuperadminService:
     
     async def get_company_with_boss(self, company_id: int) -> CompanyWithBossResponse:
         """Obtener empresa con su Boss (si existe)"""
-        company = self.repository.get_company(company_id)
+        company = await self.get_company(company_id)
         if not company:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

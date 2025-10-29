@@ -2,7 +2,7 @@
 
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, text, desc, func ,case ,or_
+from sqlalchemy import and_, text, desc, func ,case ,or_ 
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from datetime import datetime, date
 import logging
@@ -495,7 +495,7 @@ class WarehouseRepository:
                     ProductSize.company_id == TransferRequest.company_id
                 )
             ).filter(
-                TransferRequest.status == 'accepted',
+                TransferRequest.status.in_(['accepted','delivered']),
                 TransferRequest.warehouse_keeper_id == warehouse_keeper_id,
                 TransferRequest.company_id == company_id
             ).order_by(

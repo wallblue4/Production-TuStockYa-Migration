@@ -42,7 +42,8 @@ class InventoryService:
                     {
                         "size": size.size,
                         "quantity": size.quantity,
-                        "quantity_exhibition": size.quantity_exhibition
+                        "quantity_exhibition": size.quantity_exhibition,
+                        "inventory_type": size.inventory_type
                     }
                     for size in sizes
                 ]
@@ -77,7 +78,7 @@ class InventoryService:
             )
 
     async def get_warehouse_keeper_inventory(self, user_id: int, search_params: InventoryByRoleParams) -> List[ProductResponse]:
-        """Obtener inventario para bodeguero - solo bodegas asignadas"""
+        """Obtener inventario para bodeguero - ubicaciones asignadas"""
         try:
             products = self.repository.search_products_by_warehouse_keeper(user_id, search_params, self.company_id)
             
@@ -88,7 +89,8 @@ class InventoryService:
                     {
                         "size": size.size,
                         "quantity": size.quantity,
-                        "quantity_exhibition": size.quantity_exhibition
+                        "quantity_exhibition": size.quantity_exhibition,
+                        "inventory_type": size.inventory_type
                     }
                     for size in sizes
                 ]
@@ -134,7 +136,8 @@ class InventoryService:
                     {
                         "size": size.size,
                         "quantity": size.quantity,
-                        "quantity_exhibition": size.quantity_exhibition
+                        "quantity_exhibition": size.quantity_exhibition,
+                        "inventory_type": size.inventory_type
                     }
                     for size in sizes
                 ]
@@ -169,7 +172,7 @@ class InventoryService:
             )
 
     async def get_all_warehouse_keeper_inventory(self, user_id: int) -> List[ProductResponse]:
-        """Obtener TODOS los productos para bodeguero - solo bodegas asignadas"""
+        """Obtener TODOS los productos para bodeguero - ubicaciones asignadas"""
         try:
             products = self.repository.get_all_products_by_warehouse_keeper(user_id, self.company_id)
             
@@ -180,7 +183,8 @@ class InventoryService:
                     {
                         "size": size.size,
                         "quantity": size.quantity,
-                        "quantity_exhibition": size.quantity_exhibition
+                        "quantity_exhibition": size.quantity_exhibition,
+                        "inventory_type": size.inventory_type
                     }
                     for size in sizes
                 ]
@@ -226,7 +230,8 @@ class InventoryService:
                     {
                         "size": size.size,
                         "quantity": size.quantity,
-                        "quantity_exhibition": size.quantity_exhibition
+                        "quantity_exhibition": size.quantity_exhibition,
+                        "inventory_type": size.inventory_type
                     }
                     for size in sizes
                 ]
@@ -293,7 +298,7 @@ class InventoryService:
     async def get_grouped_warehouse_keeper_inventory(self, user_id: int) -> GroupedInventoryResponse:
         """Obtener inventario agrupado por ubicación para bodeguero"""
         try:
-            # Obtener ubicaciones asignadas (solo bodegas)
+            # Obtener ubicaciones asignadas (bodegas y locales)
             locations = self.repository.get_warehouse_locations_info(user_id, self.company_id)
             
             if not locations:
@@ -436,7 +441,7 @@ class InventoryService:
     async def get_simple_warehouse_keeper_inventory(self, user_id: int) -> SimpleInventoryResponse:
         """Obtener inventario simplificado para bodeguero - estructura por ubicación"""
         try:
-            # Obtener ubicaciones asignadas (solo bodegas)
+            # Obtener ubicaciones asignadas (bodegas y locales)
             locations = self.repository.get_warehouse_locations_info(user_id, self.company_id)
             
             if not locations:
@@ -752,7 +757,7 @@ class InventoryService:
                         "available_quantity": loc['pairs']
                     }
                 })
-                break  # Solo sugerir la primera bodega
+                break  # Solo sugerir la primera ubicación
         
         # Sugerencia 3: Solicitar pie faltante
         if (local_avail['left_feet'] > 0 and local_avail['right_feet'] == 0) or \

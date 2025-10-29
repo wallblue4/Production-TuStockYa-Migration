@@ -19,7 +19,7 @@ from app.shared.schemas.inventory_distribution import (
     InventoryTypeEnum
 )
 
-from app.shared.database.models import Product, Location, TransferRequest ,ReturnNotification
+from app.shared.database.models import Product, Location, TransferRequest ,ReturnNotification, ProductSize
 
 logger = logging.getLogger(__name__)
 

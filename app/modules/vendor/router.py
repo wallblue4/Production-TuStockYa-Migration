@@ -1,6 +1,7 @@
 # app/modules/vendor/router.py
-from fastapi import APIRouter, Depends, Query , Body , HTTPException , Path
+from fastapi import APIRouter, Depends, Query , Body , HTTPException , Path, Form
 from sqlalchemy.orm import Session
+import json
 
 from app.config.database import get_db
 from app.core.auth.dependencies import require_roles, get_current_company_id
@@ -105,6 +106,58 @@ async def confirm_reception(
     return await service.confirm_reception(
         request_id, received_quantity, condition_ok, notes, current_user.id
     )
+
+@router.post("/sell-from-transfer/{request_id}")
+async def sell_product_from_transfer(
+    request_id: int,
+    total_amount: float = Form(..., description="Monto total de la venta", gt=0),
+    payment_methods: str = Form(..., description="JSON string con métodos de pago"),
+    notes: str = Form("", description="Notas adicionales"),
+    current_user = Depends(require_roles(["seller", "administrador", "boss"])),
+    company_id: int = Depends(get_current_company_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Registrar venta de producto recibido por transferencia
+    
+    **Funcionalidad:**
+    - Validar que la transferencia esté en estado 'completed'
+    - Crear venta automática del producto recibido
+    - Actualizar estado de transferencia a 'selled'
+    - Descontar inventario automáticamente
+    
+    **Flujo:**
+    1. Vendedor ya confirmó recepción (status='completed')
+    2. Vendedor vende el producto al cliente
+    3. Sistema registra venta y marca transferencia como 'selled'
+    
+    **Request Form Data:**
+    - total_amount: Monto total de la venta
+    - payment_methods: JSON string con métodos de pago
+      Ejemplo: [{"type": "efectivo", "amount": 1500.00, "reference": null}]
+    - notes: Notas adicionales (opcional)
+    """
+    service = VendorService(db, company_id)
+    
+    try:
+        # Parsear métodos de pago
+        payment_methods_data = json.loads(payment_methods)
+        
+        return await service.sell_product_from_transfer(
+            request_id=request_id,
+            total_amount=total_amount,
+            payment_methods=payment_methods_data,
+            notes=notes,
+            seller_id=current_user.id,
+            location_id=current_user.location_id,
+            company_id=company_id
+        )
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"payment_methods JSON inválido: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error procesando venta: {str(e)}")
 
 @router.get("/my-pickup-assignments")
 async def get_my_pickup_assignments(
@@ -230,13 +283,14 @@ async def vendor_health():
     return {
         "service": "vendor",
         "status": "healthy",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "features": [
             "Dashboard completo del vendedor",
             "Métricas en tiempo real",
             "Transferencias pendientes",
             "Asignaciones de pickup personal",
             "Historial del día",
-            "Confirmación de recepciones"
+            "Confirmación de recepciones",
+            "Venta directa desde transferencias"
         ]
     }

@@ -17,16 +17,16 @@ async def create_discount_request(
     db: Session = Depends(get_db)
 ):
     """
-    VE007: Solicitar descuentos hasta $5,000 (requiere aprobación)
+    VE007: Solicitar descuentos hasta $20,000 (requiere aprobación)
     
     **Funcionalidad:**
     - Solicitar descuento con monto y razón
-    - Validación automática del límite ($5,000)
+    - Validación automática del límite ($20,000)
     - Envío automático al administrador para aprobación
     - Sistema de seguimiento del estado
     
     **Validaciones:**
-    - Monto máximo $5,000 pesos
+    - Monto máximo $20,000 pesos
     - Razón obligatoria (mínimo 10 caracteres)
     - Solo vendedores pueden solicitar
     
@@ -76,7 +76,7 @@ async def discounts_health():
             "Estadísticas de aprobación"
         ],
         "limits": {
-            "max_discount_amount": 5000,
+            "max_discount_amount": 20000,
             "currency": "COP"
         }
     }

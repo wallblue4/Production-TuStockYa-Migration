@@ -51,7 +51,7 @@ async def get_warehouse_keeper_inventory(
     current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
-    """Obtener inventario para bodeguero - solo bodegas asignadas"""
+    """Obtener inventario para bodeguero - ubicaciones asignadas"""
     service = InventoryService(db, current_company_id)
     search_params = InventoryByRoleParams(
         reference_code=reference_code,
@@ -90,7 +90,7 @@ async def get_all_warehouse_keeper_inventory(
     current_company_id: int = Depends(get_current_company_id),
     db: Session = Depends(get_db)
 ):
-    """Obtener TODO el inventario para bodeguero - solo bodegas asignadas con estructura simplificada"""
+    """Obtener TODO el inventario para bodeguero - ubicaciones asignadas con estructura simplificada"""
     service = InventoryService(db, current_company_id)
     return await service.get_simple_warehouse_keeper_inventory(current_user.id)
 

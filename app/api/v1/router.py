@@ -259,7 +259,7 @@ async def list_modules():
                 "description": "Gestión de inventario por roles",
                 "features": [
                     "Consulta general de inventario",
-                    "Inventario para bodegueros (solo bodegas)",
+                    "Inventario para bodegueros (ubicaciones asignadas)",
                     "Inventario para administradores (locales y bodegas)",
                     "Filtros avanzados por marca, modelo, talla"
                 ],

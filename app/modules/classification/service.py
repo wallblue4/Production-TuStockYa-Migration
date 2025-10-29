@@ -349,8 +349,8 @@ class ClassificationService:
         include_transfer_options: bool = True
     ) -> Dict[str, Any]:
         """
-        Procesar escaneo de producto con IA incluyendo pies separados
-        ✅ MEJORADO: Retorna información DETALLADA de TODAS las tallas
+        Procesar escaneo de producto con IA - MÚLTIPLES RESULTADOS CON INFORMACIÓN DETALLADA
+        ✅ MEJORADO: Retorna TODOS los matches con información DETALLADA de TODAS las tallas
         """
         start_time = datetime.now()
         
@@ -363,111 +363,174 @@ class ClassificationService:
             classification_result = await self._call_classification_microservice(content)
             
             if classification_result and classification_result.get('results'):
-                # Procesar primer resultado (mejor match)
-                best_match = classification_result['results'][0]
-                model_name = best_match.get('model_name', '')
-                brand = self._extract_brand_from_model(model_name) if best_match.get('brand') == 'Unknown' else best_match.get('brand')
+                # 🆕 PROCESAR MÚLTIPLES RESULTADOS (hasta 5)
+                results = classification_result.get('results', [])
+                processed_matches = []
+                inventory_service = InventoryService(self.db, self.company_id)
                 
-                # Buscar producto en inventario
-                local_products = self.repository.search_products_by_description(
-                    model_name=model_name,
-                    brand=brand,
-                    company_id=self.company_id
-                )
+                logger.info(f"📊 Procesando {len(results[:5])} resultados del microservicio")
                 
-                if local_products:
-                    product = local_products[0]
+                for rank, result in enumerate(results[:5], 1):
+                    model_name = result.get('model_name', '')
+                    original_brand = result.get('brand', 'Unknown')
                     
-                    # 🆕 OBTENER TODAS LAS TALLAS CON DISTRIBUCIÓN
-                    product_sizes = self.repository.get_product_sizes(product['id'], self.company_id)
+                    # Extraer marca del model_name si es "Unknown"
+                    brand = self._extract_brand_from_model(model_name) if original_brand == 'Unknown' else original_brand
                     
-                    if product_sizes:
-                        # ✅ OBTENER TALLAS ÚNICAS
-                        unique_sizes = sorted(list(set(ps['size'] for ps in product_sizes)))
+                    logger.info(f"\n🔍 Match #{rank}: {brand} {model_name}")
+                    
+                    # Buscar producto en inventario
+                    local_products = self.repository.search_products_by_description(
+                        model_name=model_name,
+                        brand=brand,
+                        company_id=self.company_id
+                    )
+                    
+                    if local_products:
+                        product = local_products[0]
+                        logger.info(f"✅ Producto encontrado: {product['reference_code']}")
                         
-                        logger.info(f"📊 Procesando {len(unique_sizes)} tallas: {unique_sizes}")
+                        # 🆕 OBTENER TODAS LAS TALLAS CON DISTRIBUCIÓN
+                        product_sizes = self.repository.get_product_sizes(product['id'], self.company_id)
                         
-                        # ✅ OBTENER DISPONIBILIDAD DETALLADA DE CADA TALLA
-                        inventory_service = InventoryService(self.db, self.company_id)
-                        sizes_detailed = {}
-                        
-                        for size in unique_sizes:
-                            logger.info(f"   🔍 Procesando talla {size}...")
+                        if product_sizes:
+                            # ✅ OBTENER TALLAS ÚNICAS
+                            unique_sizes = sorted(list(set(ps['size'] for ps in product_sizes)))
                             
-                            try:
-                                size_info = await inventory_service.get_enhanced_availability(
-                                    reference_code=product['reference_code'],
-                                    size=size,
-                                    user_location_id=current_user.location_id,
-                                    user_id=current_user.id
-                                )
-                                sizes_detailed[size] = size_info
-                                logger.info(f"   ✅ Talla {size} procesada")
-                            except Exception as e:
-                                logger.error(f"   ❌ Error procesando talla {size}: {str(e)}")
-                                # Continuar con otras tallas si una falla
-                                sizes_detailed[size] = {
-                                    "error": str(e),
-                                    "size": size
-                                }
+                            logger.info(f"📏 Procesando {len(unique_sizes)} tallas: {unique_sizes}")
+                            
+                            # ✅ OBTENER DISPONIBILIDAD DETALLADA DE CADA TALLA
+                            sizes_detailed = {}
+                            
+                            for size in unique_sizes:
+                                try:
+                                    size_info = await inventory_service.get_enhanced_availability(
+                                        reference_code=product['reference_code'],
+                                        size=size,
+                                        user_location_id=current_user.location_id,
+                                        user_id=current_user.id
+                                    )
+                                    sizes_detailed[size] = size_info
+                                except Exception as e:
+                                    logger.error(f"❌ Error procesando talla {size}: {str(e)}")
+                                    sizes_detailed[size] = {
+                                        "error": str(e),
+                                        "size": size
+                                    }
+                            
+                            # ✅ CALCULAR RESUMEN GLOBAL (TODAS LAS TALLAS)
+                            global_summary = self._calculate_global_summary(sizes_detailed, current_user.location_id)
+                            
+                            # ✅ AGREGAR A RESULTADOS PROCESADOS
+                            match = {
+                                "rank": rank,
+                                "similarity_score": result.get('similarity_score', 0.0),
+                                "confidence_percentage": result.get('confidence_percentage', 0),
+                                "confidence_level": result.get('confidence_level', 'low'),
+                                
+                                "classification": {
+                                    "model_detected": model_name,
+                                    "brand_detected": brand,
+                                    "classification_source": "microservice_ai"
+                                },
+                                
+                                "product": {
+                                    "product_id": product['id'],
+                                    "reference_code": product['reference_code'],
+                                    "brand": product['brand'],
+                                    "model": product['model'],
+                                    "description": product.get('description'),
+                                    "unit_price": product['unit_price'],
+                                    "box_price": product.get('box_price'),
+                                    "image_url": product.get('image_url')
+                                },
+                                
+                                # ✅ INFORMACIÓN DETALLADA POR TALLA
+                                "sizes": {
+                                    "available_sizes": unique_sizes,
+                                    "total_sizes": len(unique_sizes),
+                                    "detailed_by_size": sizes_detailed
+                                },
+                                
+                                # ✅ RESUMEN GLOBAL (TODAS LAS TALLAS COMBINADAS)
+                                "global_summary": global_summary,
+                                
+                                # ✅ DISTRIBUCIÓN COMPLETA
+                                "distribution_matrix": product_sizes
+                            }
+                            
+                            processed_matches.append(match)
+                            logger.info(f"✅ Match #{rank} procesado completamente")
                         
-                        # ✅ CALCULAR RESUMEN GLOBAL (TODAS LAS TALLAS)
-                        global_summary = self._calculate_global_summary(sizes_detailed, current_user.location_id)
+                        else:
+                            logger.warning(f"⚠️ Producto {product['reference_code']} sin tallas registradas")
+                    else:
+                        logger.warning(f"⚠️ Producto no encontrado en inventario: {brand} {model_name}")
                         
-                        processing_time = (datetime.now() - start_time).total_seconds() * 1000
-                        
-                        logger.info(f"✅ Scan completado en {processing_time:.2f}ms")
-                        
-                        # ✅ RESPUESTA COMPLETA CON TODAS LAS TALLAS
-                        return {
-                            "success": True,
-                            "scan_timestamp": datetime.now().isoformat(),
-                            "scanned_by": {
-                                "user_id": current_user.id,
-                                "email": current_user.email,
-                                "name": f"{current_user.first_name} {current_user.last_name}",
-                                "role": current_user.role,
-                                "location_id": current_user.location_id
-                            },
+                        # 🆕 AGREGAR MATCH BÁSICO SIN INVENTARIO
+                        match = {
+                            "rank": rank,
+                            "similarity_score": result.get('similarity_score', 0.0),
+                            "confidence_percentage": result.get('confidence_percentage', 0),
+                            "confidence_level": result.get('confidence_level', 'low'),
+                            
                             "classification": {
-                                "confidence_score": best_match.get('similarity_score', 0),
-                                "confidence_percentage": best_match.get('confidence_percentage', 0),
                                 "model_detected": model_name,
                                 "brand_detected": brand,
                                 "classification_source": "microservice_ai"
                             },
+                            
                             "product": {
-                                "product_id": product['id'],
-                                "reference_code": product['reference_code'],
-                                "brand": product['brand'],
-                                "model": product['model'],
-                                "description": product.get('description'),
-                                "unit_price": product['unit_price'],
-                                "box_price": product.get('box_price'),
-                                "image_url": product.get('image_url')
+                                "product_id": None,
+                                "reference_code": f"CLASSIFIED-{rank:03d}",
+                                "brand": brand,
+                                "model": model_name,
+                                "description": f"{brand} {model_name}",
+                                "unit_price": 0,
+                                "box_price": 0,
+                                "image_url": result.get('image_url')
                             },
                             
-                            # ✅ INFORMACIÓN DETALLADA POR TALLA
-                            "sizes": {
-                                "available_sizes": unique_sizes,
-                                "total_sizes": len(unique_sizes),
-                                "detailed_by_size": sizes_detailed
-                            },
-                            
-                            # ✅ RESUMEN GLOBAL (TODAS LAS TALLAS COMBINADAS)
-                            "global_summary": global_summary,
-                            
-                            # ✅ DISTRIBUCIÓN COMPLETA (Para referencia rápida)
-                            "distribution_matrix": product_sizes,
-                            
-                            "processing_time_ms": round(processing_time, 2)
+                            "availability": {
+                                "in_inventory": False,
+                                "message": "Producto identificado - No disponible en inventario actual"
+                            }
                         }
+                        
+                        processed_matches.append(match)
+                
+                processing_time = (datetime.now() - start_time).total_seconds() * 1000
+                
+                logger.info(f"✅ Scan completado: {len(processed_matches)} matches en {processing_time:.2f}ms")
+                
+                # ✅ RESPUESTA CON TODOS LOS MATCHES
+                return {
+                    "success": True,
+                    "scan_timestamp": datetime.now().isoformat(),
+                    "scanned_by": {
+                        "user_id": current_user.id,
+                        "email": current_user.email,
+                        "name": f"{current_user.first_name} {current_user.last_name}",
+                        "role": current_user.role,
+                        "location_id": current_user.location_id
+                    },
+                    "results": {
+                        "total_matches": len(processed_matches),
+                        "matches": processed_matches
+                    },
+                    "processing_time_ms": round(processing_time, 2),
+                    "classification_service": {
+                        "service": "microservice_integration",
+                        "url": self.microservice_url,
+                        "status": "available"
+                    }
+                }
             
             # Fallback si no se encuentra o microservicio no disponible
             return await self._classification_fallback(current_user)
         
         except Exception as e:
-            logger.error(f"Error en scan_product: {str(e)}")
+            logger.error(f"Error en scan_product_distributed: {str(e)}")
             logger.exception(e)
             raise HTTPException(500, f"Error al procesar escaneo: {str(e)}")
 

@@ -735,3 +735,101 @@ class VendorService:
             foot_name = "izquierdo" if inventory_type == 'left_only' else "derecho"
             opposite_name = "derecho" if inventory_type == 'left_only' else "izquierdo"
             return f"⚠️ Pie {foot_name} recibido y guardado en inventario. Necesitas solicitar el pie {opposite_name} para completar el par y poder vender."
+   
+    async def sell_product_from_transfer(
+        self,
+        request_id: int,
+        total_amount: float ,
+        payment_methods: list,
+        notes: str,
+        seller_id: int,
+        location_id: int,
+        company_id: int
+    ) -> Dict[str, Any]:
+        """
+        Vender producto que fue recibido por transferencia
+        """
+        from app.modules.sales_new.service import SalesService
+        from app.modules.sales_new.schemas import SaleCreateRequest, SaleItem, PaymentMethod
+        from decimal import Decimal
+        
+        try:
+            logger.info(f"🛍️ Iniciando venta desde transferencia #{request_id}")
+            
+            # 1. Obtener y validar transferencia
+            transfer_validation = self.repository.validate_transfer_for_sale(
+                request_id, 
+                seller_id, 
+                company_id
+            )
+            
+            if not transfer_validation["valid"]:
+                raise HTTPException(400, detail=transfer_validation["error"])
+            
+            transfer = transfer_validation["transfer"]
+            
+            # 2. Calcular precio unitario (total_amount / cantidad)
+            quantity = transfer.received_quantity or transfer.quantity
+            unit_price = Decimal(str(total_amount)) / Decimal(str(quantity))
+            
+            # 3. Preparar datos de venta
+            sale_item = SaleItem(
+                sneaker_reference_code=transfer.sneaker_reference_code,
+                size=transfer.size,
+                quantity=quantity,
+                unit_price=unit_price
+            )
+            
+            payment_methods_objs = [
+                PaymentMethod(**pm) for pm in payment_methods
+            ]
+            
+            sale_request = SaleCreateRequest(
+                items=[sale_item],
+                total_amount=Decimal(str(total_amount)),
+                payment_methods=payment_methods_objs,
+                notes=notes or f"Venta desde transferencia #{request_id}",
+                requires_confirmation=False
+            )
+            
+            # 4. Crear venta usando el servicio de sales
+            sales_service = SalesService(self.db)
+            sale_result = await sales_service.create_sale_complete(
+                sale_data=sale_request,
+                receipt_image=None,
+                seller_id=seller_id,
+                location_id=location_id,
+                company_id=company_id
+            )
+            
+            # 5. Actualizar status de transferencia a 'selled'
+            self.repository.mark_transfer_as_selled(
+                request_id,
+                sale_result.sale_id,
+                company_id
+            )
+            
+            logger.info(f"✅ Venta #{sale_result.sale_id} creada - Transferencia #{request_id} marcada como 'selled'")
+            
+            return {
+                "success": True,
+                "message": "Venta registrada exitosamente",
+                "transfer_id": request_id,
+                "transfer_status": "selled",
+                "sale_id": sale_result.sale_id,
+                "total_amount": float(total_amount),
+                "product_info": {
+                    "reference_code": transfer.sneaker_reference_code,
+                    "brand": transfer.brand,
+                    "model": transfer.model,
+                    "size": transfer.size,
+                    "quantity": quantity
+                },
+                "inventory_updated": True
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Error vendiendo producto desde transferencia")
+            raise HTTPException(500, detail=f"Error procesando venta: {str(e)}")

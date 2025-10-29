@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, case
 from typing import Dict, Any, List, Optional
 from datetime import datetime, date
 from decimal import Decimal
@@ -223,20 +223,21 @@ class SalesRepository:
         summary = self.db.query(
             func.count(Sale.id).label('total_sales'),
             func.sum(
-                func.case(
+                case(
                     (Sale.confirmed == True, Sale.total_amount),
                     else_=0
                 )
             ).label('confirmed_amount'),
             func.sum(
-                func.case(
+                case(
                     (and_(Sale.confirmed == False, Sale.requires_confirmation == True), Sale.total_amount),
                     else_=0
                 )
             ).label('pending_amount'),
             func.count(
-                func.case(
-                    (and_(Sale.confirmed == False, Sale.requires_confirmation == True), 1)
+                case(
+                    (and_(Sale.confirmed == False, Sale.requires_confirmation == True), 1),
+                    else_=None
                 )
             ).label('pending_confirmations')
         ).filter(

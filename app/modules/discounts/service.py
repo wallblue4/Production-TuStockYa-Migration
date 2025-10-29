@@ -16,7 +16,7 @@ class DiscountsService:
     def __init__(self, db: Session):
         self.db = db
         self.repository = DiscountsRepository(db)
-        self.MAX_DISCOUNT_AMOUNT = 5000
+        self.MAX_DISCOUNT_AMOUNT = 20000
     
     async def create_discount_request(
         self,

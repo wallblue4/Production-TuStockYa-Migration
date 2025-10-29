@@ -81,3 +81,9 @@ class MyPickupAssignmentsResponse(BaseResponse):
 class DeliveryNotes(BaseModel):
     # La variable se llama 'delivery_notes' y es de tipo str.
     delivery_notes: str = Field(..., description="Notas de entrega")
+
+class SaleFromTransferRequest(BaseModel):
+    """Request para vender producto desde transferencia"""
+    unit_price: Decimal = Field(..., gt=0, description="Precio de venta del producto")
+    payment_methods: List[dict] = Field(..., min_items=1, description="Métodos de pago")
+    notes: str = Field("", description="Notas de la venta")

@@ -61,19 +61,19 @@ class InventoryRepository:
         return [assignment[1].name for assignment in assignments]
 
     def search_products_by_warehouse_keeper(self, user_id: int, search_params: InventoryByRoleParams, company_id: int) -> List[Product]:
-        """Buscar productos para bodeguero - solo bodegas asignadas - FILTRADO POR COMPANY_ID"""
+        """Buscar productos para bodeguero - ubicaciones asignadas - FILTRADO POR COMPANY_ID"""
         # Obtener ubicaciones asignadas al bodeguero
         assigned_location_names = self.get_user_assigned_location_names(user_id, company_id)
         
         if not assigned_location_names:
             return []
         
-        # Filtrar solo bodegas (type = 'bodega')
+        # Filtrar bodegas y locales asignadas
         warehouse_locations = self.db.query(Location).filter(
             and_(
                 Location.name.in_(assigned_location_names),
                 Location.company_id == company_id,
-                Location.type == 'bodega'
+                Location.type.in_(['bodega', 'local'])
             )
         ).all()
         
@@ -143,19 +143,19 @@ class InventoryRepository:
         return query.all()
 
     def get_all_products_by_warehouse_keeper(self, user_id: int, company_id: int) -> List[Product]:
-        """Obtener TODOS los productos para bodeguero - solo bodegas asignadas - FILTRADO POR COMPANY_ID"""
+        """Obtener TODOS los productos para bodeguero - ubicaciones asignadas - FILTRADO POR COMPANY_ID"""
         # Obtener ubicaciones asignadas al bodeguero
         assigned_location_names = self.get_user_assigned_location_names(user_id, company_id)
         
         if not assigned_location_names:
             return []
         
-        # Filtrar solo bodegas (type = 'bodega')
+        # Filtrar bodegas y locales asignadas
         warehouse_locations = self.db.query(Location).filter(
             and_(
                 Location.name.in_(assigned_location_names),
                 Location.company_id == company_id,
-                Location.type == 'bodega'
+                Location.type.in_(['bodega', 'local'])
             )
         ).all()
         
@@ -164,7 +164,7 @@ class InventoryRepository:
         if not warehouse_names:
             return []
         
-        # Obtener TODOS los productos de las bodegas asignadas
+        # Obtener TODOS los productos de las ubicaciones asignadas
         return self.db.query(Product).filter(
             and_(
                 Product.company_id == company_id,
@@ -217,9 +217,9 @@ class InventoryRepository:
         return [assignment[1] for assignment in assignments]
 
     def get_warehouse_locations_info(self, user_id: int, company_id: int) -> List[Location]:
-        """Obtener información de bodegas asignadas a un usuario - FILTRADO POR COMPANY_ID"""
+        """Obtener información de ubicaciones asignadas a un usuario - FILTRADO POR COMPANY_ID"""
         assigned_locations = self.get_user_assigned_locations_info(user_id, company_id)
-        return [loc for loc in assigned_locations if loc.type == 'bodega']
+        return [loc for loc in assigned_locations if loc.type in ['bodega', 'local']]
 
     def get_admin_locations_info(self, user_id: int, company_id: int) -> List[Location]:
         """Obtener información de locales y bodegas asignadas a un administrador - FILTRADO POR COMPANY_ID"""
@@ -276,7 +276,8 @@ class InventoryRepository:
             products_dict[product.id]['sizes'].append({
                 'size': size.size,
                 'quantity': size.quantity,
-                'quantity_exhibition': size.quantity_exhibition
+                'quantity_exhibition': size.quantity_exhibition,
+                'inventory_type': size.inventory_type
             })
             products_dict[product.id]['total_quantity'] += size.quantity
         

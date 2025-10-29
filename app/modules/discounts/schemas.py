@@ -6,7 +6,7 @@ from datetime import datetime
 from app.shared.schemas.common import BaseResponse
 
 class DiscountRequestCreate(BaseModel):
-    amount: Decimal = Field(..., gt=0, le=5000, description="Monto del descuento (máximo $5,000)")
+    amount: Decimal = Field(..., gt=0, le=20000, description="Monto del descuento (máximo $20,000)")
     reason: str = Field(..., min_length=10, max_length=500, description="Razón del descuento")
     
     @validator('reason')
@@ -23,7 +23,7 @@ class DiscountRequestResponse(BaseResponse):
     requested_at: datetime
     seller_info: Dict[str, Any]
     within_limit: bool
-    max_allowed: int = 5000
+    max_allowed: int = 20000
 
 class MyDiscountRequestsResponse(BaseResponse):
     requests: List[Dict[str, Any]]
