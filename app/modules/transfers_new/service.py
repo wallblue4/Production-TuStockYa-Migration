@@ -1,6 +1,6 @@
 # app/modules/transfers_new/service.py - VERSIÓN CORREGIDA
 
-from typing import Dict, Any
+from typing import Dict, Any , Optional ,List
 from datetime import datetime, timedelta
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -10,7 +10,7 @@ import logging
 from .repository import TransfersRepository
 from .schemas import (TransferRequestCreate, TransferRequestResponse, MyTransferRequestsResponse
                         , ReceptionConfirmation , ReturnRequestCreate 
-                        , ReturnRequestResponse, ReturnReceptionConfirmation,  ReturnReceptionConfirmation,
+                        , ReturnRequestResponse, ReturnReceptionConfirmation,  ReturnReceptionConfirmation,ReturnSplitInfo,
     SingleFootTransferResponse)
 from app.shared.schemas.inventory_distribution import (
     SingleFootTransferRequest,
@@ -544,6 +544,7 @@ class TransfersService:
             }
         }
 
+    
     async def create_return_request(
         self,
         return_data: ReturnRequestCreate,
@@ -551,189 +552,307 @@ class TransfersService:
         company_id: int
     ) -> ReturnRequestResponse:
         """
-        VE006: Crear solicitud de devolución de producto
+        🆕 ACTUALIZADO: Crear solicitud de devolución con soporte para:
+        - Pies individuales (left_only, right_only)
+        - Pares completos
+        - Partición automática de pares cuando sea necesario
         
-        Proceso:
-        1. Validar transferencia original existe y completada
-        2. Validar permisos (solo solicitante original)
-        3. Validar cantidad a devolver
-        4. Crear nueva transferencia con ruta INVERTIDA
-        5. Marcar como tipo 'return'
-        6. Crear notificación
+        Flujo:
+        1. Validar transfer original y permisos
+        2. Validar disponibilidad (considerando pies sueltos + pares)
+        3. Si requiere partición, partir pares automáticamente
+        4. Crear TransferRequest de tipo 'return'
+        5. Registrar operación en historial
+        6. Retornar respuesta con información de partición
+        
+        Args:
+            return_data: Datos de la devolución (incluye inventory_type y foot_side)
+            requester_id: ID del usuario que solicita la devolución
+            company_id: ID de la compañía
+        
+        Returns:
+            ReturnRequestResponse con información completa de la devolución
+        
+        Raises:
+            HTTPException 400: Si no se puede cumplir la devolución
+            HTTPException 403: Si no tiene permisos
+            HTTPException 404: Si no se encuentra el transfer original
         """
+        
         try:
-            logger.info(f"🔄 Creando devolución - Usuario: {requester_id}")
+            logger.info(f"📦 Creando devolución - Usuario: {requester_id}")
             logger.info(f"   Transfer original: {return_data.original_transfer_id}")
+            logger.info(f"   Cantidad: {return_data.quantity_to_return}")
+            logger.info(f"   Tipo: {return_data.inventory_type}")
+            if return_data.foot_side:
+                logger.info(f"   Lado: {return_data.foot_side}")
             
-            # ==================== VALIDACIÓN 1: TRANSFERENCIA ORIGINAL ====================
-            original = self.db.query(TransferRequest).filter(
-                TransferRequest.id == return_data.original_transfer_id,
-                TransferRequest.company_id == company_id
+            # ========== 1. VALIDAR TRANSFER ORIGINAL ==========
+            original_transfer = self.db.query(TransferRequest).filter(
+                and_(
+                    TransferRequest.id == return_data.original_transfer_id,
+                    TransferRequest.company_id == company_id
+                )
             ).first()
             
-            if not original:
-                logger.error(f"❌ Transferencia original no encontrada")
+            if not original_transfer:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"Transferencia #{return_data.original_transfer_id} no existe"
+                    detail="Transfer original no encontrado"
                 )
             
-            logger.info(f"✅ Transfer original encontrado: {original.sneaker_reference_code}")
-            
-            # ==================== VALIDACIÓN 2: ESTADO ====================
-            if original.status != 'completed':
-                logger.error(f"❌ Estado inválido: {original.status}")
+            # Validar que esté completado
+            if original_transfer.status != 'completed':
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Solo se pueden devolver transferencias completadas. Estado actual: {original.status}"
+                    detail=f"Solo se pueden devolver transfers completados. Estado actual: {original_transfer.status}"
                 )
             
-            # ==================== VALIDACIÓN 3: PERMISOS ====================
-            if original.requester_id != requester_id:
-                logger.error(f"❌ Usuario no autorizado: {requester_id} != {original.requester_id}")
+            # Validar que sea el solicitante original
+            if original_transfer.requester_id != requester_id:
                 raise HTTPException(
                     status_code=403,
-                    detail="Solo el solicitante original puede crear devolución"
+                    detail="Solo el solicitante original puede devolver el producto"
                 )
             
-            # ==================== VALIDACIÓN 4: CANTIDAD ====================
-            if return_data.quantity_to_return > original.quantity:
-                logger.error(
-                    f"❌ Cantidad excede lo recibido: "
-                    f"{return_data.quantity_to_return} > {original.quantity}"
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Cantidad a devolver ({return_data.quantity_to_return}) "
-                           f"excede lo recibido originalmente ({original.quantity})"
-                )
-            
-            # ==================== VALIDACIÓN 5: NO DEVOLVER DOS VECES ====================
+            # Validar que no se haya devuelto antes
             existing_return = self.db.query(TransferRequest).filter(
                 and_(
-                    TransferRequest.original_transfer_id == original.id,
-                    TransferRequest.company_id == company_id,
-                    TransferRequest.status.in_(['pending', 'accepted', 'in_transit', 'delivered'])
+                    TransferRequest.original_transfer_id == return_data.original_transfer_id,
+                    TransferRequest.company_id == company_id
                 )
             ).first()
             
             if existing_return:
-                logger.warning(f"⚠️ Ya existe devolución activa: {existing_return.id}")
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Ya existe una devolución activa para esta transferencia (ID: {existing_return.id})"
+                    detail=f"Este transfer ya fue devuelto (Return ID: {existing_return.id})"
                 )
             
-            logger.info(f"✅ Todas las validaciones pasaron")
+            # Validar cantidad
+            quantity_received = original_transfer.received_quantity or original_transfer.quantity
+            if return_data.quantity_to_return > quantity_received:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No puedes devolver más de lo que recibiste. Recibido: {quantity_received}"
+                )
             
-            # ==================== CREAR RETURN (INVERTIR ORIGEN-DESTINO) ====================
-            logger.info(f"📝 Creando return en BD")
-
-            return_pickup_type = return_data.pickup_type
+            logger.info(f"   ✅ Transfer original validado")
+            
+            # ========== 2. OBTENER INFORMACIÓN DEL PRODUCTO Y UBICACIONES ==========
+            product = self.db.query(Product).filter(
+                and_(
+                    Product.reference_code == original_transfer.sneaker_reference_code,
+                    Product.company_id == company_id
+                )
+            ).first()
+            
+            if not product:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Producto no encontrado"
+                )
+            
+            # Ubicación actual (destino del transfer original = origen del return)
+            current_location = self.db.query(Location).filter(
+                and_(
+                    Location.id == original_transfer.destination_location_id,
+                    Location.company_id == company_id
+                )
+            ).first()
+            
+            # Ubicación destino (origen del transfer original = destino del return)
+            destination_location = self.db.query(Location).filter(
+                and_(
+                    Location.id == original_transfer.source_location_id,
+                    Location.company_id == company_id
+                )
+            ).first()
+            
+            if not current_location or not destination_location:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Ubicación no encontrada"
+                )
+            
+            logger.info(f"   📍 Ubicación actual: {current_location.name}")
+            logger.info(f"   📍 Ubicación destino: {destination_location.name}")
+            
+            # ========== 3. 🆕 VALIDAR DISPONIBILIDAD CON LÓGICA DE PARTICIÓN ==========
+            inventory_type = return_data.inventory_type or InventoryTypeEnum.PAIR
+            inventory_type_str = inventory_type.value if isinstance(inventory_type, InventoryTypeEnum) else inventory_type
+            
+            logger.info(f"   🔍 Validando disponibilidad para tipo: {inventory_type_str}")
+            
+            validation = self.repository.validate_return_availability(
+                product_id=product.id,
+                size=original_transfer.size,
+                inventory_type=inventory_type_str,
+                location_name=current_location.name,
+                quantity_requested=return_data.quantity_to_return,
+                company_id=company_id
+            )
+            
+            if not validation['can_fulfill']:
+                logger.error(f"   ❌ {validation.get('error', 'Stock insuficiente')}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=validation.get('error', 'Stock insuficiente para devolución')
+                )
+            
+            logger.info(f"   ✅ Disponibilidad validada")
+            
+            # ========== 4. 🆕 SI REQUIERE PARTICIÓN, EJECUTARLA ==========
+            split_info = None
+            
+            if validation.get('requires_split'):
+                pairs_to_split = validation['pairs_to_split']
+                logger.info(f"   🔪 Devolución requiere partir {pairs_to_split} par(es)")
+                
+                try:
+                    split_result = self.repository.split_pair_for_return(
+                        product_id=product.id,
+                        size=original_transfer.size,
+                        location_name=current_location.name,
+                        inventory_type_needed=inventory_type_str,
+                        pairs_to_split=pairs_to_split,
+                        company_id=company_id,
+                        user_id=requester_id,
+                        return_id=0  # Se actualizará después de crear el return
+                    )
+                    
+                    logger.info(f"   ✅ Partición completada exitosamente")
+                    logger.info(f"      - Pares partidos: {split_result['pairs_split']}")
+                    logger.info(f"      - Pies opuestos agregados: {split_result['opposite_feet_added']}")
+                    logger.info(f"      - Pares restantes: {split_result['pairs_remaining']}")
+                    
+                    # Crear objeto de información de partición
+                    split_info = ReturnSplitInfo(
+                        requires_split=True,
+                        loose_feet_used=validation['loose_feet_to_use'],
+                        pairs_to_split=validation['pairs_to_split'],
+                        remaining_opposite_feet=validation['remaining_opposite_feet'],
+                        total_available=validation['total_feet_available']
+                    )
+                    
+                except Exception as e:
+                    logger.exception(f"   ❌ Error ejecutando partición: {str(e)}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Error al partir pares para devolución: {str(e)}"
+                    )
+            else:
+                logger.info(f"   ℹ️ No requiere partición de pares")
+            
+            # ========== 5. CREAR TRANSFERREQUEST DE DEVOLUCIÓN ==========
+            logger.info(f"   📝 Creando TransferRequest de devolución")
+            
+            # Preparar notas con información de devolución
+            return_notes = f"Razón: {return_data.reason}\n"
+            if return_data.product_condition != 'good':
+                return_notes += f"Condición: {return_data.product_condition}\n"
+            if return_data.notes:
+                return_notes += f"{return_data.notes}\n"
+            if split_info:
+                return_notes += f"\n⚠️ PARTICIÓN AUTOMÁTICA: {split_info.pairs_to_split} par(es) partido(s)"
             
             return_transfer = TransferRequest(
-                original_transfer_id=original.id,
-                requester_id=requester_id,
                 company_id=company_id,
-                
-                # ← INVERTIR ubicaciones (clave del return)
-                source_location_id=original.destination_location_id,  # Local vendedor
-                destination_location_id=original.source_location_id,  # Bodega
-                
-                # Mismos datos de producto
-                sneaker_reference_code=original.sneaker_reference_code,
-                brand=original.brand,
-                model=original.model,
-                size=original.size,
+                requester_id=requester_id,
+                source_location_id=original_transfer.destination_location_id,  # Invertido
+                destination_location_id=original_transfer.source_location_id,   # Invertido
+                sneaker_reference_code=original_transfer.sneaker_reference_code,
+                brand=original_transfer.brand,
+                model=original_transfer.model,
+                size=original_transfer.size,
                 quantity=return_data.quantity_to_return,
-                
-                # Marcar como return
+                inventory_type=inventory_type_str,  # 🆕 Guardar tipo correcto
                 purpose='return',
-                pickup_type=return_pickup_type,  # Returns siempre con corredor
-                destination_type='bodega',
-                request_type='return',  # Explícito
-                
-                status='pending',
-                notes=(
-                    f"DEVOLUCIÓN de Transfer #{original.id}\n"
-                    f"Razón: {return_data.reason}\n"
-                    f"Condición: {return_data.product_condition}\n"
-                    f"{return_data.notes or ''}"
-                ),
-                requested_at=datetime.now()
+                notes=return_notes,
+                pickup_type=return_data.pickup_type,
+                destination_type='bodega o local',
+                request_type="return",
+                status='pending',  
+                requested_at=datetime.now(),
+                original_transfer_id=return_data.original_transfer_id
             )
             
             self.db.add(return_transfer)
-            self.db.flush()
+            self.db.commit()
             self.db.refresh(return_transfer)
             
-            logger.info(f"✅ Return creado con ID: {return_transfer.id}")
+            logger.info(f"   ✅ TransferRequest creado - ID: {return_transfer.id}")
             
-            # ==================== CREAR NOTIFICACIÓN ====================
-            source_location = self.db.query(Location).filter(
-                Location.id == original.source_location_id,
-                Location.company_id == company_id
-            ).first()
+            # ========== 6. ACTUALIZAR REFERENCE_ID EN INVENTORY_CHANGE SI HUBO SPLIT ==========
+            if split_info:
+                logger.info(f"   📝 Actualizando reference_id en InventoryChange")
+                
+                from app.shared.database.models import InventoryChange
+                
+                self.db.query(InventoryChange).filter(
+                    and_(
+                        InventoryChange.product_id == product.id,
+                        InventoryChange.reference_id == 0,
+                        InventoryChange.change_type == 'pair_split_for_return',
+                        InventoryChange.size == original_transfer.size,
+                        InventoryChange.company_id == company_id
+                    )
+                ).update({"reference_id": return_transfer.id})
+                
+                self.db.commit()
+                logger.info(f"   ✅ Reference_id actualizado")
             
-            notification = ReturnNotification(
-                transfer_request_id=return_transfer.id,
-                returned_to_location=source_location.name if source_location else "Bodega",
-                notes=return_data.notes or f"Devolución por: {return_data.reason}",
-                read_by_requester=True,
-                created_at=datetime.now(),
-                company_id=company_id
+            # ========== 7. GENERAR WORKFLOW STEPS ==========
+            workflow_steps = self._generate_return_workflow_steps(
+                return_data.pickup_type,
+                destination_location.type
             )
-            self.db.add(notification)
             
-            # ==================== COMMIT ====================
-            self.db.commit()
+            # Agregar mensaje sobre partición si aplica
+            if split_info:
+                opposite_type_name = (
+                    "derecho(s)" if inventory_type_str == 'left_only' 
+                    else "izquierdo(s)"
+                )
+                
+                split_message = (
+                    f"✂️ Se partieron {split_info.pairs_to_split} par(es) automáticamente para la devolución. "
+                    f"Quedan {split_info.remaining_opposite_feet} pie(s) {opposite_type_name} en tu inventario."
+                )
+                workflow_steps.insert(0, split_message)
             
-            logger.info(f"✅ Devolución creada exitosamente")
+            # ========== 8. CONSTRUIR Y RETORNAR RESPUESTA ==========
+            response_message = self._generate_return_message(
+                return_data.pickup_type,
+                split_info,
+                inventory_type_str
+            )
             
-            # ==================== RESPUESTA ====================
-            if return_pickup_type == 'vendedor':
-                workflow_steps = [
-                    "1. 📋 Bodeguero aceptará la solicitud (BG001-BG002)",
-                    "2. 🚶 TÚ deberás llevar el producto a bodega personalmente",
-                    "3. 🏪 Bodeguero confirmará que recibió el producto físicamente",
-                    "4. 🔍 Bodeguero verificará condición y restaurará inventario (BG010)"
-                ]
-                estimated_time = "10-20 minutos (depende de tu disponibilidad)"
-                message = "Devolución creada - Llevarás el producto a bodega personalmente"
-                next_action = "Esperar que bodeguero acepte, luego ir a bodega con el producto"
-            else:
-                workflow_steps = [
-                    "1. 📋 Bodeguero aceptará la solicitud (BG001-BG002)",
-                    "2. 🚚 Corredor recogerá el producto en tu local (CO002-CO003)",
-                    "3. 🚚 Corredor entregará en bodega (CO004)",
-                    "4. 🔍 Bodeguero confirmará recepción y restaurará inventario (BG010)"
-                ]
-                estimated_time = "15 minutos"
-                message = "Devolución creada - Un corredor recogerá el producto"
-                next_action = "Esperar que bodeguero acepte, luego corredor coordinará recogida"
-
+            logger.info(f"✅ Devolución creada exitosamente - ID: {return_transfer.id}")
+            
             return ReturnRequestResponse(
                 success=True,
-                message=f"Devolución creada - Sigue el mismo flujo que transferencia normal",
+                message=response_message,
                 return_id=return_transfer.id,
-                original_transfer_id=original.id,
-                status="pending",
-                pickup_type=return_pickup_type,
-                estimated_return_time="2-3 horas",
+                original_transfer_id=return_data.original_transfer_id,
+                status=return_transfer.status,
+                pickup_type=return_data.pickup_type,
                 workflow_steps=workflow_steps,
-                priority="normal",
-                next_action=next_action
+                priority='normal',
+                split_info=split_info,
+                inventory_type=inventory_type_str
             )
             
         except HTTPException:
             raise
         except Exception as e:
-            logger.exception("❌ Error inesperado creando devolución")
-            self.db.rollback()
+            logger.exception(f"❌ Error creando devolución: {str(e)}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Error creando devolución: {str(e)}"
             )
+    
+    
     
     async def get_my_returns(self, vendor_id: int, user_info: Dict[str, Any], company_id: int) -> Dict[str, Any]:
         """Obtener mis devoluciones activas"""
@@ -788,4 +907,302 @@ class TransfersService:
             return [
                 "1. Esperando que el vendedor prepare el producto",
                 "2. Corredor recogerá y entregará"
+            ]
+
+
+    def _generate_return_message(
+        self,
+        pickup_type: str,
+        split_info: Optional[ReturnSplitInfo],
+        inventory_type: str
+    ) -> str:
+        """
+        🆕 Generar mensaje apropiado según tipo de pickup y si hubo partición
+        
+        Args:
+            pickup_type: 'corredor' o 'vendedor'
+            split_info: Información de partición (None si no hubo)
+            inventory_type: Tipo de inventario ('pair', 'left_only', 'right_only')
+        
+        Returns:
+            str: Mensaje descriptivo para el usuario
+        """
+        
+        # Mensaje base según tipo de pickup
+        if pickup_type == 'vendedor':
+            base_message = "Devolución creada exitosamente. Llevarás el producto tú mismo a bodega"
+        else:
+            base_message = "Devolución creada exitosamente. Un corredor recogerá el producto"
+        
+        # Agregar información sobre partición si aplica
+        if split_info and split_info.requires_split:
+            foot_type = (
+                "izquierdos" if inventory_type == 'left_only'
+                else "derechos" if inventory_type == 'right_only'
+                else "pares"
+            )
+            
+            opposite_type = (
+                "derechos" if inventory_type == 'left_only'
+                else "izquierdos" if inventory_type == 'right_only'
+                else ""
+            )
+            
+            if inventory_type in ['left_only', 'right_only']:
+                split_detail = (
+                    f". Se partieron automáticamente {split_info.pairs_to_split} par(es) "
+                    f"para obtener los {split_info.pairs_to_split} pie(s) {foot_type} necesarios. "
+                    f"Los {split_info.remaining_opposite_feet} pie(s) {opposite_type} permanecen en tu inventario"
+                )
+                return base_message + split_detail
+        
+        return base_message
+
+    async def _reverse_pair_before_return(
+        self,
+        return_transfer: TransferRequest,
+        warehouse_keeper_id: int
+    ) -> Dict[str, Any]:
+        """
+        🆕 Revertir par auto-formado antes de procesar devolución
+        
+        Escenario:
+        - Vendedor recibió pie individual (Transfer A)
+        - Sistema auto-formó par con pie opuesto existente (Transfer B)
+        - Vendedor devuelve Transfer A
+        - ANTES de restaurar inventario en bodega, debemos:
+        1. Separar el par en pies individuales
+        2. Mantener el pie de Transfer B en el local
+        3. Devolver solo el pie de Transfer A a bodega
+        
+        Proceso:
+        1. Validar que el par existe en el local del vendedor
+        2. Restar 1 del inventario de 'pair'
+        3. Sumar 1 a cada pie individual (left_only y right_only)
+        4. Registrar reversión en historial
+        
+        Args:
+            return_transfer: El TransferRequest de return que tiene auto_formed_pair_id
+            warehouse_keeper_id: ID del bodeguero que procesa
+        
+        Returns:
+            Dict con resultado de la reversión
+        """
+        
+        try:
+            logger.info(f"🔄 Iniciando reversión de par auto-formado")
+            logger.info(f"   Return Transfer ID: {return_transfer.id}")
+            logger.info(f"   Original Transfer ID: {return_transfer.original_transfer_id}")
+            logger.info(f"   Vinculado con Transfer ID: {return_transfer.auto_formed_pair_id}")
+            
+            # ==================== OBTENER TRANSFERENCIA ORIGINAL ====================
+            original_transfer = self.db.query(TransferRequest).filter(
+                TransferRequest.id == return_transfer.original_transfer_id
+            ).first()
+            
+            if not original_transfer:
+                raise ValueError("Transferencia original no encontrada")
+            
+            # ==================== OBTENER UBICACIÓN DEL VENDEDOR ====================
+            # El vendedor está en destination_location del transfer original
+            vendor_location = self.db.query(Location).filter(
+                and_(
+                    Location.id == original_transfer.destination_location_id,
+                    Location.company_id == self.company_id
+                )
+            ).first()
+            
+            if not vendor_location:
+                raise ValueError("Ubicación del vendedor no encontrada")
+            
+            logger.info(f"   Ubicación vendedor: {vendor_location.name}")
+            
+            # ==================== OBTENER PRODUCTO ====================
+            product = self.db.query(Product).filter(
+                and_(
+                    Product.reference_code == return_transfer.sneaker_reference_code,
+                    Product.company_id == self.company_id
+                )
+            ).first()
+            
+            if not product:
+                raise ValueError(f"Producto {return_transfer.sneaker_reference_code} no encontrado")
+            
+            # ==================== BUSCAR EL PAR EN EL LOCAL DEL VENDEDOR ====================
+            pair_inventory = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product.id,
+                    ProductSize.size == return_transfer.size,
+                    ProductSize.location_name == vendor_location.name,
+                    ProductSize.inventory_type == 'pair',
+                    ProductSize.company_id == self.company_id
+                )
+            ).with_for_update().first()
+            
+            if not pair_inventory or pair_inventory.quantity < 1:
+                # Posiblemente el vendedor ya vendió el par
+                logger.warning(f"⚠️ No hay par disponible para revertir")
+                logger.warning(f"   Es posible que el vendedor ya haya vendido el par")
+                return {
+                    "reversed": False,
+                    "reason": "pair_not_available",
+                    "message": "El par ya no está disponible (posiblemente vendido)"
+                }
+            
+            pair_qty_before = pair_inventory.quantity
+            logger.info(f"   Par encontrado: quantity={pair_qty_before}")
+            
+            # ==================== REVERTIR: RESTAR DEL PAR ====================
+            pair_inventory.quantity -= 1
+            pair_inventory.updated_at = datetime.now()
+            
+            logger.info(f"   ✅ Par decrementado: {pair_qty_before} → {pair_inventory.quantity}")
+            
+            # ==================== BUSCAR/CREAR PIE IZQUIERDO ====================
+            left_foot = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product.id,
+                    ProductSize.size == return_transfer.size,
+                    ProductSize.location_name == vendor_location.name,
+                    ProductSize.inventory_type == 'left_only',
+                    ProductSize.company_id == self.company_id
+                )
+            ).with_for_update().first()
+            
+            if left_foot:
+                left_before = left_foot.quantity
+                left_foot.quantity += 1
+                left_foot.updated_at = datetime.now()
+                logger.info(f"   ✅ Pie izquierdo incrementado: {left_before} → {left_foot.quantity}")
+            else:
+                left_foot = ProductSize(
+                    product_id=product.id,
+                    size=return_transfer.size,
+                    quantity=1,
+                    inventory_type='left_only',
+                    location_name=vendor_location.name,
+                    company_id=self.company_id,
+                    created_at=datetime.now(),
+                    updated_at=datetime.now()
+                )
+                self.db.add(left_foot)
+                logger.info(f"   ✅ Pie izquierdo creado: quantity=1")
+            
+            # ==================== BUSCAR/CREAR PIE DERECHO ====================
+            right_foot = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product.id,
+                    ProductSize.size == return_transfer.size,
+                    ProductSize.location_name == vendor_location.name,
+                    ProductSize.inventory_type == 'right_only',
+                    ProductSize.company_id == self.company_id
+                )
+            ).with_for_update().first()
+            
+            if right_foot:
+                right_before = right_foot.quantity
+                right_foot.quantity += 1
+                right_foot.updated_at = datetime.now()
+                logger.info(f"   ✅ Pie derecho incrementado: {right_before} → {right_foot.quantity}")
+            else:
+                right_foot = ProductSize(
+                    product_id=product.id,
+                    size=return_transfer.size,
+                    quantity=1,
+                    inventory_type='right_only',
+                    location_name=vendor_location.name,
+                    company_id=self.company_id,
+                    created_at=datetime.now(),
+                    updated_at=datetime.now()
+                )
+                self.db.add(right_foot)
+                logger.info(f"   ✅ Pie derecho creado: quantity=1")
+            
+            # ==================== REGISTRAR EN HISTORIAL ====================
+            from app.shared.database.models import InventoryChange
+            
+            reversal_change = InventoryChange(
+                product_id=product.id,
+                change_type='pair_reversal_for_return',
+                size=return_transfer.size,
+                quantity_before=pair_qty_before,
+                quantity_after=pair_inventory.quantity,
+                user_id=warehouse_keeper_id,
+                reference_id=return_transfer.id,
+                company_id=self.company_id,
+                notes=(
+                    f"REVERSIÓN DE PAR AUTO-FORMADO\n"
+                    f"Return Transfer: #{return_transfer.id}\n"
+                    f"Original Transfer: #{original_transfer.id}\n"
+                    f"Ubicación: {vendor_location.name}\n"
+                    f"Par → Pies individuales:\n"
+                    f"  - pair: {pair_qty_before} → {pair_inventory.quantity}\n"
+                    f"  - left_only: {left_foot.quantity - 1} → {left_foot.quantity}\n"
+                    f"  - right_only: {right_foot.quantity - 1} → {right_foot.quantity}\n"
+                    f"Razón: Preparar devolución de {return_transfer.inventory_type}"
+                ),
+                created_at=datetime.now()
+            )
+            self.db.add(reversal_change)
+            
+            # ==================== COMMIT ====================
+            self.db.commit()
+            
+            logger.info(f"🎉 ¡REVERSIÓN COMPLETADA EXITOSAMENTE!")
+            logger.info(f"   Par separado en pies individuales")
+            logger.info(f"   Ahora se puede procesar la devolución del pie {return_transfer.inventory_type}")
+            
+            return {
+                "reversed": True,
+                "reason": "pair_reversed_successfully",
+                "message": "Par revertido a pies individuales para procesar devolución",
+                "location": vendor_location.name,
+                "details": {
+                    "pair_before": pair_qty_before,
+                    "pair_after": pair_inventory.quantity,
+                    "left_only": left_foot.quantity,
+                    "right_only": right_foot.quantity
+                }
+            }
+            
+        except Exception as e:
+            logger.exception(f"❌ Error revirtiendo par: {str(e)}")
+            self.db.rollback()
+            raise ValueError(f"Error al revertir par: {str(e)}")
+
+
+    # app/modules/transfers_new/service.py
+
+    def _generate_return_workflow_steps(
+        self,
+        pickup_type: str,
+        destination_type: str
+    ) -> List[str]:
+        """
+        Generar pasos del workflow de devolución
+        
+        Args:
+            pickup_type: 'corredor' o 'vendedor'
+            destination_type: Tipo de ubicación destino (generalmente 'bodega')
+        
+        Returns:
+            List[str]: Lista de pasos del workflow
+        """
+        
+        if pickup_type == 'vendedor':
+            return [
+                "1. Bodeguero aceptará la solicitud de devolución",
+                "2. Llevarás el producto personalmente a bodega",
+                "3. Bodeguero verificará el producto",
+                "4. Bodeguero confirmará la recepción",
+                "5. Inventario se restaurará en bodega automáticamente"
+            ]
+        else:
+            return [
+                "1. Bodeguero aceptará la solicitud de devolución",
+                "2. Se asignará un corredor para la recogida",
+                "3. Corredor recogerá el producto en tu ubicación",
+                "4. Corredor transportará a bodega",
+                "5. Bodeguero verificará y confirmará recepción",
+                "6. Inventario se restaurará en bodega automáticamente"
             ]

@@ -266,11 +266,9 @@ async def confirm_return_reception(
             message=result["message"],
             return_id=result["return_id"],
             original_transfer_id=result["original_transfer_id"],
-            received_quantity=result["received_quantity"],
-            product_condition=result["product_condition"],
             inventory_restored=result["inventory_restored"],
             warehouse_location=result["warehouse_location"],
-            inventory_change=result["inventory_change"]
+            inventory_type=result["inventory_type"]
         )
         
     except ValueError as e:

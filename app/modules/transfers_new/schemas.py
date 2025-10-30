@@ -66,21 +66,65 @@ class ReceptionConfirmation(BaseModel):
     condition_ok: bool = Field(..., description="Condición del producto OK")
     notes: str = Field("", description="Notas de recepción")
 
+# app/modules/transfers_new/schemas.py
+
+from typing import Optional, Literal
+from pydantic import BaseModel, Field, validator
+from app.shared.schemas.inventory_distribution import InventoryTypeEnum, FootSide
+
 class ReturnRequestCreate(BaseModel):
-    """Schema para crear solicitud de devolución"""
-    original_transfer_id: int = Field(..., description="ID de la transferencia original")
-    reason: str = Field(..., description="Motivo: no_sale, defect, wrong_product, customer_rejection")
-    quantity_to_return: int = Field(..., gt=0, description="Cantidad a devolver")
-    pickup_type: str = Field(
-        "corredor",
-        description="Método de devolución: 'corredor' (corredor recoge) o 'vendedor' (llevas tú mismo)"
+    """
+    Schema para crear solicitud de devolución
+    
+    🆕 ACTUALIZADO: Ahora soporta devolución de pies individuales
+    """
+    original_transfer_id: int = Field(
+        ..., 
+        gt=0, 
+        description="ID de la transferencia original que se desea devolver"
     )
-    product_condition: str = Field("good", description="Estado: good, damaged, unusable")
-    notes: Optional[str] = Field(None, max_length=500)
+    
+    reason: str = Field(
+        ...,
+        description="Razón de la devolución: 'no_sale', 'damaged', 'wrong_size', 'overstock'"
+    )
+    
+    quantity_to_return: int = Field(
+        ..., 
+        gt=0, 
+        description="Cantidad a devolver"
+    )
+    
+    product_condition: str = Field(
+        ...,
+        description="Condición del producto: 'good', 'damaged', 'unusable'"
+    )
+    
+    pickup_type: str = Field(
+        ...,
+        description="Tipo de recogida: 'corredor' o 'vendedor'"
+    )
+    
+    notes: Optional[str] = Field(
+        None, 
+        max_length=500,
+        description="Notas adicionales sobre la devolución"
+    )
+    
+    # 🆕 NUEVOS CAMPOS PARA PIES INDIVIDUALES
+    inventory_type: Optional[InventoryTypeEnum] = Field(
+        default=InventoryTypeEnum.PAIR,
+        description="Tipo de inventario: 'pair', 'left_only', 'right_only'"
+    )
+    
+    foot_side: Optional[FootSide] = Field(
+        None,
+        description="Lado del pie: 'left' o 'right' (requerido si inventory_type no es 'pair')"
+    )
     
     @validator('reason')
     def validate_reason(cls, v):
-        allowed = ['no_sale', 'defect', 'wrong_product', 'customer_rejection', 'overstock']
+        allowed = ['no_sale', 'damaged', 'wrong_size', 'overstock']
         if v not in allowed:
             raise ValueError(f'Razón debe ser una de: {allowed}')
         return v
@@ -91,56 +135,148 @@ class ReturnRequestCreate(BaseModel):
         if v not in allowed:
             raise ValueError(f'Condición debe ser una de: {allowed}')
         return v
-
+    
     @validator('pickup_type')
     def validate_pickup_type(cls, v):
         allowed_types = ['corredor', 'vendedor']
         if v not in allowed_types:
             raise ValueError(f'pickup_type debe ser: {allowed_types}')
         return v
-
-        class Config:
-            json_schema_extra = {
-                "example": {
-                    "original_transfer_id": 123,
-                    "reason": "no_sale",
-                    "quantity_to_return": 1,
-                    "product_condition": "good",
-                    "pickup_type": "vendedor",
-                    "notes": "Cliente no lo compró, lo llevaré yo mismo a bodega"
-                }
+    
+    # 🆕 VALIDADOR PARA FOOT_SIDE
+    @validator('foot_side')
+    def validate_foot_side_with_type(cls, v, values):
+        """Validar que foot_side sea consistente con inventory_type"""
+        inventory_type = values.get('inventory_type')
+        
+        # Si es pie individual, foot_side es requerido
+        if inventory_type in [InventoryTypeEnum.LEFT_ONLY, InventoryTypeEnum.RIGHT_ONLY]:
+            if not v:
+                raise ValueError("foot_side es requerido cuando inventory_type es 'left_only' o 'right_only'")
+            
+            # Validar consistencia
+            if inventory_type == InventoryTypeEnum.LEFT_ONLY and v != FootSide.left:
+                raise ValueError("foot_side debe ser 'left' cuando inventory_type es 'left_only'")
+            if inventory_type == InventoryTypeEnum.RIGHT_ONLY and v != FootSide.right:
+                raise ValueError("foot_side debe ser 'right' cuando inventory_type es 'right_only'")
+        
+        # Si es par, foot_side no debe especificarse
+        elif inventory_type == InventoryTypeEnum.PAIR and v:
+            raise ValueError("foot_side no debe especificarse cuando inventory_type es 'pair'")
+        
+        return v
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "original_transfer_id": 123,
+                "reason": "no_sale",
+                "quantity_to_return": 2,
+                "product_condition": "good",
+                "pickup_type": "vendedor",
+                "inventory_type": "left_only",
+                "foot_side": "left",
+                "notes": "Cliente no compró, devuelvo 2 pies izquierdos"
             }
+        }
 
+
+class ReturnSplitInfo(BaseModel):
+    """
+    Información sobre la partición de pares realizada para una devolución
+    
+    Esta información se retorna al usuario para transparencia sobre
+    cómo se procesó su devolución cuando fue necesario partir pares.
+    """
+    requires_split: bool = Field(
+        ...,
+        description="Si fue necesario partir pares para cumplir la devolución"
+    )
+    
+    loose_feet_used: int = Field(
+        ...,
+        ge=0,
+        description="Cantidad de pies sueltos utilizados directamente"
+    )
+    
+    pairs_to_split: int = Field(
+        ...,
+        ge=0,
+        description="Cantidad de pares que se partieron"
+    )
+    
+    remaining_opposite_feet: int = Field(
+        ...,
+        ge=0,
+        description="Cantidad de pies opuestos que quedaron como sueltos en inventario"
+    )
+    
+    total_available: int = Field(
+        ...,
+        ge=0,
+        description="Total de pies disponibles (sueltos + en pares) antes de la devolución"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "requires_split": True,
+                "loose_feet_used": 1,
+                "pairs_to_split": 3,
+                "remaining_opposite_feet": 3,
+                "total_available": 4
+            }
+        }
 
 class ReturnRequestResponse(BaseResponse):
-    """Respuesta al crear devolución"""
-    return_id: int
-    original_transfer_id: int
-    status: str
-    pickup_type: str
-    estimated_return_time: str
-    workflow_steps: List[str]
-    priority: str = "normal"
-
+    """
+    Respuesta al crear una solicitud de devolución
+    
+    🆕 ACTUALIZADO: Incluye información sobre partición de pares
+    """
+    return_id: int = Field(..., description="ID de la devolución creada")
+    original_transfer_id: int = Field(..., description="ID del transfer original")
+    status: str = Field(..., description="Estado actual de la devolución")
+    pickup_type: str = Field(..., description="Tipo de recogida")
+    workflow_steps: List[str] = Field(..., description="Pasos del flujo de devolución")
+    priority: str = Field(default="normal", description="Prioridad")
+    
+    # 🆕 INFORMACIÓN DE PARTICIÓN
+    split_info: Optional[ReturnSplitInfo] = Field(
+        None,
+        description="Información sobre partición de pares (si aplica)"
+    )
+    
+    inventory_type: Optional[str] = Field(
+        None,
+        description="Tipo de inventario devuelto: 'pair', 'left_only', 'right_only'"
+    )
+    
     class Config:
         json_schema_extra = {
             "example": {
                 "success": True,
-                "message": "Devolución creada - Llevarás el producto tú mismo",
+                "message": "Devolución creada. Se partieron 3 pares automáticamente.",
                 "return_id": 456,
                 "original_transfer_id": 123,
                 "status": "pending",
                 "pickup_type": "vendedor",
-                "estimated_return_time": "1-2 horas",
                 "workflow_steps": [
+                    "✂️ Se partieron 3 par(es) para la devolución. Quedan 3 pie(s) derecho(s) en tu inventario.",
                     "Bodeguero aceptará la solicitud",
                     "Llevarás el producto a bodega personalmente",
                     "Bodeguero confirmará recepción",
-                    "Inventario se restaurará"
+                    "Inventario restaurado en bodega"
                 ],
-                "return_type": "return",
                 "priority": "normal",
-                "next_action": "Esperar aceptación de bodeguero"
+                "split_info": {
+                    "requires_split": True,
+                    "loose_feet_used": 1,
+                    "pairs_to_split": 3,
+                    "remaining_opposite_feet": 3,
+                    "total_available": 4
+                },
+                "inventory_type": "left_only"
             }
         }
 
@@ -158,6 +294,9 @@ class ReturnReceptionConfirmation(BaseModel):
         if v not in allowed:
             raise ValueError(f'Condición debe ser: {allowed}')
         return v
+
+
+        
 
 class ReturnReceptionResponse(BaseResponse):
     """Respuesta al confirmar recepción de return"""
@@ -244,3 +383,5 @@ class SingleFootTransferResponse(BaseResponse):
     quantity_formable: int
     status: str
     next_steps: List[str]
+
+

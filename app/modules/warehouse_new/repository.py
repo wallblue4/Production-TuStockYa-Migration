@@ -1,7 +1,7 @@
 # app/modules/warehouse_new/repository.py - VERSIÓN COMPLETA
 
 from typing import Dict, Any, List, Optional
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 from sqlalchemy import and_, text, desc, func ,case ,or_ 
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from datetime import datetime, date
@@ -453,10 +453,14 @@ class WarehouseRepository:
 
     # app/modules/warehouse_new/repository.py
 
+    # Actualización del método get_accepted_requests_by_warehouse_keeper
+# Para incluir el nombre del corredor asignado cuando el pickup_type es 'corredor'
+
     def get_accepted_requests_by_warehouse_keeper(self, warehouse_keeper_id: int, company_id: int) -> List[Dict[str, Any]]:
         """
         BG002: Obtener solicitudes aceptadas
         ✅ CON ROLLBACK PREVENTIVO
+        ✅ INCLUYE NOMBRE DEL CORREDOR cuando pickup_type = 'corredor' y hay courier_id
         """
         
         # ✅ Rollback preventivo
@@ -468,13 +472,19 @@ class WarehouseRepository:
         try:
             logger.info(f"📋 Buscando solicitudes aceptadas para bodeguero {warehouse_keeper_id}")
             
+            # Alias para el corredor
+            Courier = aliased(User)
+            
             query = self.db.query(
                 TransferRequest,
                 User.first_name.label('requester_first_name'),
                 User.last_name.label('requester_last_name'),
                 Location.name.label('source_location_name'),
                 func.coalesce(Product.image_url, '').label('product_image'),
-                func.coalesce(ProductSize.quantity, 0).label('stock_available')
+                func.coalesce(ProductSize.quantity, 0).label('stock_available'),
+                # ✅ NUEVO: Incluir nombre del corredor
+                Courier.first_name.label('courier_first_name'),
+                Courier.last_name.label('courier_last_name')
             ).join(
                 User, TransferRequest.requester_id == User.id
             ).join(
@@ -494,8 +504,15 @@ class WarehouseRepository:
                     ProductSize.inventory_type == TransferRequest.inventory_type.cast(ProductSize.inventory_type.type),
                     ProductSize.company_id == TransferRequest.company_id
                 )
+            ).outerjoin(
+                # ✅ NUEVO: Join con la tabla User para obtener info del corredor
+                Courier, 
+                and_(
+                    TransferRequest.courier_id == Courier.id,
+                    TransferRequest.pickup_type == 'corredor'  # Solo cuando es tipo corredor
+                )
             ).filter(
-                TransferRequest.status.in_(['accepted','delivered']),
+                TransferRequest.status.in_(['accepted','delivered', 'in_transit','courier_assigned']),
                 TransferRequest.warehouse_keeper_id == warehouse_keeper_id,
                 TransferRequest.company_id == company_id
             ).order_by(
@@ -513,50 +530,110 @@ class WarehouseRepository:
                 # Etiquetas descriptivas
                 inventory_type_label = {
                     'pair': '👟👟 Par completo',
-                    'left_only': '👟← Pie IZQUIERDO',
-                    'right_only': '👟→ Pie DERECHO'
-                }.get(tr.inventory_type or 'pair', '❓ Desconocido')
+                    'left_only': '👟← Pie Izquierdo',
+                    'right_only': '👟→ Pie Derecho'
+                }.get(tr.inventory_type, tr.inventory_type)
                 
-                # Obtener destino
-                dest_location = self.db.query(Location).filter(
-                    Location.id == tr.destination_location_id
-                ).first()
+                # Calcular tiempo desde aceptación
+                time_diff = datetime.now() - tr.accepted_at if tr.accepted_at else timedelta(0)
+                hours = int(time_diff.total_seconds() // 3600)
+                minutes = int((time_diff.total_seconds() % 3600) // 60)
+                time_since_accepted = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
                 
-                requests.append({
+                # Determinar tipo de solicitud
+                request_type = 'return' if tr.original_transfer_id else 'transfer'
+                request_type_display = 'DEVOLUCIÓN' if request_type == 'return' else 'TRANSFERENCIA'
+                
+                # ✅ NUEVO: Información del corredor según el tipo de entrega
+                courier_info = None
+                if tr.pickup_type == 'corredor':
+                    if tr.courier_id:
+                        # Hay corredor asignado
+                        courier_name = f"{row.courier_first_name} {row.courier_last_name}" if row.courier_first_name else "Corredor sin nombre"
+                        courier_info = {
+                            'id': tr.courier_id,
+                            'name': courier_name,
+                            'assigned': True,
+                            'status': 'assigned'
+                        }
+                    else:
+                        # No hay corredor asignado aún
+                        courier_info = {
+                            'id': None,
+                            'name': None,
+                            'assigned': False,
+                            'status': 'waiting_assignment'
+                        }
+                # Si pickup_type es 'vendedor', courier_info queda como None (no es necesario)
+                
+                # Información de recogida
+                pickup_info = self._get_pickup_info(tr)
+                
+                # Estado detallado
+                status_info = self._get_warehouse_status_info(tr.status, tr.pickup_type)
+                
+                request = {
+                    # Identificadores
                     'id': tr.id,
                     'status': tr.status,
-                    'request_type': tr.request_type,
-                    'sneaker_reference_code': tr.sneaker_reference_code,
-                    'brand': tr.brand,
-                    'model': tr.model,
-                    'size': tr.size,
-                    'quantity': tr.quantity,
+                    'status_info': status_info,
+                    'request_type': request_type,
+                    'request_type_display': request_type_display,
                     
-                    # Información clara
-                    'inventory_type': tr.inventory_type or 'pair',
-                    'inventory_type_label': inventory_type_label,
-                    'what_to_deliver': f"{tr.quantity} × {inventory_type_label}",
+                    # Producto
+                    'product': {
+                        'reference_code': tr.sneaker_reference_code,
+                        'brand': tr.brand,
+                        'model': tr.model,
+                        'size': tr.size,
+                        'quantity': tr.quantity,
+                        'inventory_type': tr.inventory_type,
+                        'inventory_type_label': inventory_type_label,
+                        'image_url': row.product_image,
+                        'stock_available': row.stock_available
+                    },
                     
+                    # Propósito
                     'purpose': tr.purpose,
+                    'purpose_display': 'Cliente esperando' if tr.purpose == 'cliente' else 'Restock',
+                    'urgent_action': tr.purpose == 'cliente',
+                    
+                    # Información de recogida
                     'pickup_type': tr.pickup_type,
+                    'pickup_info': pickup_info,
+                    
+                    'courier_info': courier_info,
+                    
+                    # Participantes
+                    'requester_info': {
+                        'id': tr.requester_id,
+                        'name': f"{row.requester_first_name} {row.requester_last_name}",
+                        'role': tr.requester.role if tr.requester else None
+                    },
+                    
+                    # Ubicación
+                    'location': {
+                        'source_id': tr.source_location_id,
+                        'source_name': row.source_location_name
+                    },
+                    
+                    # Timestamps
+                    'requested_at': tr.requested_at.isoformat() if tr.requested_at else None,
                     'accepted_at': tr.accepted_at.isoformat() if tr.accepted_at else None,
-                    'estimated_pickup_time': tr.estimated_pickup_time,
-                    'requester_name': f"{row.requester_first_name} {row.requester_last_name}",
-                    'source_location_name': row.source_location_name,
-                    'destination_location_name': dest_location.name if dest_location else 'Desconocido',
-                    'product_image': row.product_image,
-                    'stock_available': row.stock_available
-                })
+                    'time_since_accepted': time_since_accepted,
+                    
+                    # Notas
+                    'notes': tr.notes,
+                    'warehouse_notes': tr.notes
+                }
+                
+                requests.append(request)
             
-            logger.info(f"✅ Formateadas {len(requests)} solicitudes aceptadas")
+            logger.info(f"✅ {len(requests)} solicitudes formateadas correctamente")
             return requests
             
         except Exception as e:
-            logger.exception(f"❌ Error obteniendo solicitudes aceptadas: {str(e)}")
-            try:
-                self.db.rollback()
-            except:
-                pass
+            logger.exception("❌ Error obteniendo solicitudes aceptadas")
             return []
 
 
@@ -570,7 +647,6 @@ class WarehouseRepository:
                 'type_display': 'Recoge Vendedor',
                 'who': f"{transfer.requester.first_name} {transfer.requester.last_name}" if transfer.requester else 'Vendedor',
                 'description': 'El vendedor vendrá a recoger el producto personalmente',
-                'icon': '🚶',
                 'requires_courier': False
             }
         else:
@@ -581,8 +657,6 @@ class WarehouseRepository:
                     'type_display': 'Recoge Corredor',
                     'who': f"{transfer.courier.first_name} {transfer.courier.last_name}",
                     'description': f"Corredor {transfer.courier.first_name} recogerá el producto",
-                    'icon': '🚚',
-                    'requires_courier': True,
                     'courier_assigned': True,
                     'courier_id': transfer.courier_id
                 }
@@ -592,7 +666,6 @@ class WarehouseRepository:
                     'type_display': 'Esperando Corredor',
                     'who': 'Pendiente de asignar',
                     'description': 'Esperando que un corredor acepte la solicitud',
-                    'icon': '⏳',
                     'requires_courier': True,
                     'courier_assigned': False
                 }
@@ -835,7 +908,8 @@ class WarehouseRepository:
                 ProductSize.size == transfer.size,
                 ProductSize.location_name == source_location_name,  # ✅ NOMBRE REAL
                 Product.company_id == company_id,
-                ProductSize.company_id == company_id
+                ProductSize.company_id == company_id,
+                ProductSize.inventory_type == transfer.inventory_type
             )
         ).with_for_update().first()  # ← LOCK: Evita descuento simultáneo
         
@@ -1058,7 +1132,8 @@ class WarehouseRepository:
                 ProductSize.size == transfer.size,
                 ProductSize.location_name == source_location_name,
                 Product.company_id == company_id,
-                ProductSize.company_id == company_id
+                ProductSize.company_id == company_id,
+                ProductSize.inventory_type == transfer.inventory_type
             )
         ).first()
         
@@ -1176,19 +1251,40 @@ class WarehouseRepository:
         company_id: int
     ) -> Dict[str, Any]:
         """
-        BG010: Confirmar recepción de devolución con RESTAURACIÓN de inventario - FILTRADO POR COMPANY_ID
+        🆕 ACTUALIZADO: BG010 - Confirmar recepción de devolución con soporte para pies individuales
         
-        FLUJO CORRECTO:
-        1. Buscar Product GLOBAL (sin location_name) - SOLO UNA VEZ
-        2. Buscar/crear ProductSize en ubicación DESTINO (bodega)
-        3. SUMAR cantidad en ProductSize
-        4. Registrar cambio en InventoryChange
+        FLUJO ACTUALIZADO:
+        1. Validar que el return existe y está en estado 'delivered'
+        2. Validar permisos del bodeguero
+        3. Buscar producto (GLOBAL, sin location_name)
+        4. 🆕 Buscar/crear ProductSize según inventory_type correcto
+        5. SUMAR cantidad recibida (RESTAURACIÓN de inventario)
+        6. Registrar en InventoryChange
+        7. Actualizar estado del return a 'completed'
+        
+        Args:
+            return_id: ID de la devolución
+            reception_data: Datos de recepción {
+                'received_quantity': int,
+                'condition': str ('good', 'damaged', 'unusable'),
+                'notes': Optional[str]
+            }
+            warehouse_keeper_id: ID del bodeguero que confirma
+            managed_location_ids: IDs de ubicaciones que gestiona el bodeguero
+            company_id: ID de la compañía
+        
+        Returns:
+            Dict con resultado de la operación
+        
+        Raises:
+            ValueError: Si hay problemas de validación
+            Exception: Cualquier otro error
         """
         
         try:
-            logger.info(f"📦 Procesando recepción de return {return_id}")
+            logger.info(f"📦 Procesando recepción de devolución #{return_id}")
             
-            # ==================== VALIDACIÓN 1: OBTENER RETURN ====================
+            # ========== 1. OBTENER Y VALIDAR RETURN ==========
             return_transfer = self.db.query(TransferRequest).filter(
                 and_(
                     TransferRequest.id == return_id,
@@ -1197,27 +1293,36 @@ class WarehouseRepository:
             ).first()
             
             if not return_transfer:
-                raise ValueError(f"Return #{return_id} no encontrado")
+                raise ValueError(f"Devolución #{return_id} no encontrada")
             
-            # ==================== VALIDACIÓN 2: ES UN RETURN ====================
+            # Validar que es un return
             if not return_transfer.original_transfer_id:
                 raise ValueError("Esta transferencia no es una devolución")
             
-            # ==================== VALIDACIÓN 3: PERMISOS ====================
+            logger.info(f"   ✅ Return encontrado")
+            logger.info(f"      Producto: {return_transfer.sneaker_reference_code}")
+            logger.info(f"      Talla: {return_transfer.size}")
+            logger.info(f"      Cantidad: {return_transfer.quantity}")
+            logger.info(f"      Tipo: {return_transfer.inventory_type or 'pair'}")
+            
+            # ========== 2. VALIDAR PERMISOS ==========
             if return_transfer.destination_location_id not in managed_location_ids:
                 raise ValueError(
-                    f"No tienes permisos para gestionar ubicación destino (bodega)"
+                    "No tienes permisos para gestionar la ubicación destino (bodega)"
                 )
             
-            # ==================== VALIDACIÓN 4: ESTADO ====================
+            logger.info(f"   ✅ Permisos validados")
+            
+            # ========== 3. VALIDAR ESTADO ==========
             if return_transfer.status != 'delivered':
                 raise ValueError(
-                    f"Return debe estar en estado 'delivered'. Estado actual: {return_transfer.status}"
+                    f"Devolución debe estar en estado 'delivered'. "
+                    f"Estado actual: {return_transfer.status}"
                 )
             
-            logger.info(f"✅ Return válido: {return_transfer.sneaker_reference_code}")
+            logger.info(f"   ✅ Estado validado: delivered")
             
-            # ==================== OBTENER UBICACIÓN DESTINO (BODEGA) ====================
+            # ========== 4. OBTENER UBICACIÓN DESTINO ==========
             destination_location = self.db.query(Location).filter(
                 and_(
                     Location.id == return_transfer.destination_location_id,
@@ -1226,13 +1331,13 @@ class WarehouseRepository:
             ).first()
             
             if not destination_location:
-                raise ValueError("Ubicación destino (bodega) no encontrada")
+                raise ValueError("Ubicación destino no encontrada")
             
             destination_location_name = destination_location.name
-            logger.info(f"📍 Bodega destino: {destination_location_name}")
+            logger.info(f"   📍 Ubicación destino: {destination_location_name}")
             
-            # ==================== BUSCAR PRODUCTO GLOBAL (SIN LOCATION) ====================
-            # ✅ CORRECTO: Buscar Product SIN filtrar por location_name
+            # ========== 5. BUSCAR PRODUCTO (GLOBAL) ==========
+            # ⚠️ IMPORTANTE: Product NO tiene location_name
             product = self.db.query(Product).filter(
                 and_(
                     Product.reference_code == return_transfer.sneaker_reference_code,
@@ -1241,164 +1346,156 @@ class WarehouseRepository:
             ).first()
             
             if not product:
-                logger.error(
-                    f"❌ Producto {return_transfer.sneaker_reference_code} no existe en el sistema"
-                )
                 raise ValueError(
-                    f"Producto {return_transfer.sneaker_reference_code} no existe. "
-                    f"Debe estar registrado en el sistema antes de procesar devoluciones."
+                    f"Producto {return_transfer.sneaker_reference_code} no encontrado. "
+                    "Debe estar registrado en el sistema antes de procesar devoluciones."
                 )
             
-            logger.info(f"✅ Producto encontrado: ID {product.id}")
+            logger.info(f"   ✅ Producto encontrado - ID: {product.id}")
             
-            # ==================== BUSCAR/CREAR PRODUCT_SIZE EN DESTINO ====================
-            # ✅ CORRECTO: ProductSize es específico por ubicación
+            # ========== 6. 🆕 DETERMINAR INVENTORY_TYPE CORRECTO ==========
+            inventory_type = return_transfer.inventory_type or 'pair'
+            logger.info(f"   📋 Tipo de inventario: {inventory_type}")
+            
+            # ========== 7. 🆕 BUSCAR/CREAR PRODUCTSIZE SEGÚN TIPO ==========
             product_size = self.db.query(ProductSize).filter(
                 and_(
                     ProductSize.product_id == product.id,
                     ProductSize.size == return_transfer.size,
-                    ProductSize.location_name == destination_location_name,  # ← BODEGA
+                    ProductSize.location_name == destination_location_name,
+                    ProductSize.inventory_type == inventory_type,  # 🆕 Filtrar por tipo correcto
                     ProductSize.company_id == company_id
                 )
-            ).with_for_update().first()  # ← LOCK para evitar race conditions
+            ).with_for_update().first()  # ⚠️ LOCK para evitar race conditions
             
             quantity_before = 0
             
             if product_size:
-                # ✅ YA EXISTE: SUMAR cantidad (RESTAURACIÓN)
+                # ========== CASO A: YA EXISTE - SUMAR CANTIDAD (RESTAURACIÓN) ==========
                 quantity_before = product_size.quantity
                 product_size.quantity += reception_data['received_quantity']
                 product_size.updated_at = datetime.now()
                 
                 logger.info(
-                    f"✅ Stock restaurado en ProductSize (ID: {product_size.id}): "
-                    f"{quantity_before} → {product_size.quantity} "
-                    f"(+{reception_data['received_quantity']})"
+                    f"   ✅ Stock restaurado en ProductSize existente (ID: {product_size.id})"
                 )
+                logger.info(
+                    f"      Antes: {quantity_before} | "
+                    f"Después: {product_size.quantity} | "
+                    f"Incremento: +{reception_data['received_quantity']}"
+                )
+                
             else:
-                # ✅ NO EXISTE: CREAR ProductSize en bodega
+                # ========== CASO B: NO EXISTE - CREAR PRODUCTSIZE ==========
                 product_size = ProductSize(
                     product_id=product.id,
                     size=return_transfer.size,
                     quantity=reception_data['received_quantity'],
                     quantity_exhibition=0,
-                    location_name=destination_location_name,  # ← BODEGA
+                    inventory_type=inventory_type,  # 🆕 Crear con tipo correcto
+                    location_name=destination_location_name,
                     company_id=company_id,
                     created_at=datetime.now(),
                     updated_at=datetime.now()
                 )
                 self.db.add(product_size)
-                self.db.flush()  # Obtener ID
+                self.db.flush()  # Para obtener el ID
                 
                 logger.info(
-                    f"✅ Nuevo ProductSize creado (ID: {product_size.id}): "
-                    f"qty={reception_data['received_quantity']} en '{destination_location_name}'"
+                    f"   ✅ Nuevo ProductSize creado (ID: {product_size.id})"
+                )
+                logger.info(
+                    f"      Tipo: {inventory_type} | "
+                    f"Cantidad: {reception_data['received_quantity']} | "
+                    f"Ubicación: {destination_location_name}"
                 )
             
-            quantity_after = product_size.quantity
+            # ========== 8. REGISTRAR EN INVENTORYCHANGE ==========
+            foot_type_desc = ""
+            if inventory_type == 'left_only':
+                foot_type_desc = " (pies izquierdos)"
+            elif inventory_type == 'right_only':
+                foot_type_desc = " (pies derechos)"
+            elif inventory_type == 'pair':
+                foot_type_desc = " (pares)"
             
-            # ==================== MANEJAR PRODUCTO SEGÚN CONDICIÓN ====================
-            inventory_restored = True
-            change_type = 'return_reception'
-            
-            if reception_data['product_condition'] == 'damaged':
-                # Producto dañado: SUMA pero marca para revisión
-                change_type = 'return_reception_damaged'
-                logger.warning(
-                    f"⚠️ Producto recibido CON DAÑOS pero suma a inventario para reparación"
-                )
-            
-            elif reception_data['product_condition'] == 'unusable':
-                # Producto inservible: REVERTIR suma (NO regresa a inventario)
-                product_size.quantity = quantity_before  # ← Deshacer suma
-                quantity_after = quantity_before
-                inventory_restored = False
-                change_type = 'return_reception_unusable'
-                
-                logger.warning(
-                    f"❌ Producto INSERVIBLE - NO suma a inventario vendible "
-                    f"(quantity se mantiene en {quantity_before})"
-                )
-            
-            # ==================== ACTUALIZAR ESTADO DEL RETURN ====================
-            return_transfer.status = 'completed'
-            return_transfer.confirmed_reception_at = datetime.now()
-            return_transfer.received_quantity = reception_data['received_quantity']
-            return_transfer.reception_notes = (
-                f"Condición: {reception_data['product_condition']}\n"
-                f"Control calidad: {'✅ Pasó' if reception_data['quality_check_passed'] else '❌ No pasó'}\n"
-                f"Restaurado a inventario: {'✅ Sí' if inventory_restored else '❌ No'}\n"
-                f"{reception_data.get('notes', '')}"
+            notes = (
+                f"Devolución recibida y confirmada{foot_type_desc}. "
+                f"Cantidad: {reception_data['received_quantity']}. "
+                f"Condición: {reception_data.get('condition', 'good')}."
             )
             
-            logger.info(f"✅ Return marcado como completado")
+            if reception_data.get('notes'):
+                notes += f" Notas: {reception_data['notes']}"
             
-            # ==================== REGISTRAR EN HISTORIAL ====================
             inventory_change = InventoryChange(
-                product_id=product.id,  # ← Product ID global
-                change_type=change_type,
+                product_id=product.id,
+                change_type='return_reception',
                 size=return_transfer.size,
                 quantity_before=quantity_before,
-                quantity_after=quantity_after,
+                quantity_after=product_size.quantity,
                 user_id=warehouse_keeper_id,
                 reference_id=return_id,
-                company_id=company_id,
-                notes=(
-                    f"DEVOLUCIÓN recibida - Transfer original #{return_transfer.original_transfer_id}\n"
-                    f"Ubicación: {destination_location_name}\n"
-                    f"Condición: {reception_data['product_condition']}\n"
-                    f"Cantidad restaurada: {reception_data['received_quantity']}\n"
-                    f"Calidad OK: {'Sí' if reception_data['quality_check_passed'] else 'No'}\n"
-                    f"{reception_data.get('notes', '')}"
-                ),
-                created_at=datetime.now()
+                notes=notes,
+                created_at=datetime.now(),
+                company_id=company_id
             )
             self.db.add(inventory_change)
             
-            logger.info(f"✅ Cambio registrado en InventoryChange")
+            logger.info(f"   📝 Cambio registrado en InventoryChange")
             
-            # ==================== COMMIT ====================
+            # ========== 9. ACTUALIZAR ESTADO DEL RETURN ==========
+            return_transfer.status = 'completed'
+            return_transfer.completed_at = datetime.now()
+            return_transfer.reception_notes = reception_data.get('notes', 'Recibido correctamente')
+            return_transfer.delivered_at = datetime.now()  # Asegurar que tenga fecha
+            
+            logger.info(f"   ✅ Estado actualizado: completed")
+            
+            # ========== 10. COMMIT ==========
             self.db.commit()
-            logger.info(f"✅ Return completado - Transacción confirmada")
             
-            # ==================== RESPUESTA DETALLADA ====================
+            logger.info(f"✅ Devolución #{return_id} procesada exitosamente")
+            
+            # ========== 11. CONSTRUIR RESPUESTA ==========
             return {
+                "success": True,
+                "message": "Devolución recibida y procesada correctamente",
                 "return_id": return_id,
-                "original_transfer_id": return_transfer.original_transfer_id,
-                "received_quantity": reception_data['received_quantity'],
-                "product_condition": reception_data['product_condition'],
-                "inventory_restored": inventory_restored,
-                "warehouse_location": destination_location_name,
-                "inventory_change": {
-                    "product_id": product.id,
-                    "product_size_id": product_size.id,
+                "status": "completed",
+                "inventory_restored": {
                     "product_reference": return_transfer.sneaker_reference_code,
-                    "product_name": f"{return_transfer.brand} {return_transfer.model}",
+                    "brand": return_transfer.brand,
+                    "model": return_transfer.model,
                     "size": return_transfer.size,
-                    "quantity_returned": reception_data['received_quantity'],
+                    "inventory_type": inventory_type,
+                    "quantity_restored": reception_data['received_quantity'],
                     "quantity_before": quantity_before,
-                    "quantity_after": quantity_after,
-                    "location": destination_location_name,
-                    "change_type": change_type
+                    "quantity_after": product_size.quantity,
+                    "location": destination_location_name
                 },
-                "timestamps": {
-                    "return_requested_at": return_transfer.requested_at.isoformat(),
+                "reception_info": {
+                    "received_by": warehouse_keeper_id,
+                    "condition": reception_data.get('condition', 'good'),
+                    "notes": reception_data.get('notes'),
+                    "timestamp": datetime.now().isoformat()
+                },
+                "original_transfer_id": return_transfer.original_transfer_id,
+                "timeline": {
+                    "requested_at": return_transfer.requested_at.isoformat() if return_transfer.requested_at else None,
+                    "accepted_at": return_transfer.accepted_at.isoformat() if return_transfer.accepted_at else None,
                     "delivered_at": return_transfer.delivered_at.isoformat() if return_transfer.delivered_at else None,
-                    "confirmed_reception_at": return_transfer.confirmed_reception_at.isoformat()
-                },
-                "quality_info": {
-                    "condition": reception_data['product_condition'],
-                    "quality_check_passed": reception_data['quality_check_passed'],
-                    "returned_to_inventory": inventory_restored,
-                    "notes": reception_data.get('notes', '')
+                    "completed_at": return_transfer.completed_at.isoformat()
                 }
             }
             
-        except ValueError as e:
-            logger.error(f"❌ Error validación: {e}")
-            self.db.rollback()
+        except ValueError as ve:
+            # Errores de validación - no hacer rollback
+            logger.error(f"❌ Error de validación: {str(ve)}")
             raise
+            
         except Exception as e:
-            logger.exception("❌ Error confirmando return")
+            # Errores inesperados - hacer rollback
             self.db.rollback()
-            raise RuntimeError(f"Error procesando return: {str(e)}")
+            logger.exception(f"❌ Error crítico procesando recepción: {str(e)}")
+            raise Exception(f"Error procesando recepción de devolución: {str(e)}")

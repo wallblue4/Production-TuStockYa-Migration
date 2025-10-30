@@ -9,12 +9,12 @@ import logging
 from .repository import WarehouseRepository
 from .schemas import (
     WarehouseRequestAcceptance, CourierDelivery, 
-    PendingRequestsResponse, AcceptedRequestsResponse, InventoryByLocationResponse ,VendorDelivery
+    PendingRequestsResponse, AcceptedRequestsResponse, InventoryByLocationResponse ,VendorDelivery 
 )
 
 from app.shared.schemas.inventory_distribution import PairFormationResult
 
-from app.shared.database.models import TransferRequest , ProductSize , Location, Product
+from app.shared.database.models import TransferRequest , ProductSize , Location, Product , InventoryChange
 
 from app.modules.transfers_new.schemas import ReturnReceptionConfirmation
 
@@ -259,8 +259,9 @@ class WarehouseService:
             # Re-lanzar errores del sistema
             raise HTTPException(status_code=500, detail=str(e))
 
-    # AGREGAR AL FINAL DE app/modules/warehouse_new/service.py
 
+
+    
     async def confirm_return_reception(
         self,
         return_id: int,
@@ -269,12 +270,13 @@ class WarehouseService:
     ) -> Dict[str, Any]:
         """
         BG010: Confirmar recepción de devolución con RESTAURACIÓN de inventario
+        ✅ NUEVO: Ahora detecta y revierte pares auto-formados
         
         Proceso:
-        1. Validar que es un return (original_transfer_id != NULL)
-        2. Validar permisos del bodeguero
-        3. Verificar condición del producto
-        4. SUMAR inventario en bodega (reversión)
+        1. Validar permisos del bodeguero
+        2. ✅ NUEVO: Detectar si el return tiene auto_formed_pair_id
+        3. ✅ NUEVO: Si tiene, llamar _reverse_pair_before_return()
+        4. Restaurar inventario en bodega (llamar repository)
         5. Marcar como completado
         6. Registrar en historial
         """
@@ -282,14 +284,68 @@ class WarehouseService:
         try:
             logger.info(f"📦 Confirmando recepción de return #{return_id}")
             
-            # Validar permisos
-            managed_locations = self.repository.get_user_managed_locations(warehouse_keeper_id, self.company_id)
+            # ==================== VALIDAR PERMISOS ====================
+            managed_locations = self.repository.get_user_managed_locations(
+                warehouse_keeper_id, 
+                self.company_id
+            )
             location_ids = [loc['location_id'] for loc in managed_locations]
             
             if not location_ids:
                 raise HTTPException(403, detail="No tienes ubicaciones asignadas")
             
-            # Llamar al repository
+            logger.info(f"✅ Bodeguero gestiona {len(location_ids)} ubicación(es)")
+            
+            # ==================== OBTENER RETURN TRANSFER ====================
+            return_transfer = self.db.query(TransferRequest).filter(
+                and_(
+                    TransferRequest.id == return_id,
+                    TransferRequest.company_id == self.company_id
+                )
+            ).first()
+            
+            if not return_transfer:
+                raise ValueError(f"Return #{return_id} no encontrado")
+            
+            logger.info(f"✅ Return encontrado: {return_transfer.sneaker_reference_code}")
+            logger.info(f"   Tipo inventario: {return_transfer.inventory_type}")
+            logger.info(f"   Cantidad: {return_transfer.quantity}")
+            
+            # ==================== ✅ NUEVO: DETECTAR AUTO-FORMACIÓN ====================
+            requires_pair_reversal = return_transfer.auto_formed_pair_id is not None
+            reversal_result = None
+            
+            if requires_pair_reversal:
+                logger.info(f"⚠️ DETECTADO: Este return requiere REVERSIÓN DE PAR")
+                logger.info(f"   Transfer original auto-formó par con Transfer #{return_transfer.auto_formed_pair_id}")
+                logger.info(f"   Tipo: {return_transfer.inventory_type}")
+                
+                # ==================== REVERTIR PAR ANTES DE PROCESAR ====================
+                try:
+                    reversal_result = await self._reverse_pair_before_return(
+                        return_transfer=return_transfer,
+                        warehouse_keeper_id=warehouse_keeper_id
+                    )
+                    
+                    if reversal_result.get('reversed'):
+                        logger.info(f"✅ Par revertido exitosamente")
+                        logger.info(f"   Cantidad revertida: {reversal_result['quantity_reversed']} par(es)")
+                        logger.info(f"   Pares restantes: {reversal_result['pairs_remaining']}")
+                    else:
+                        logger.warning(f"⚠️ No se pudo revertir par: {reversal_result.get('reason')}")
+                        
+                except ValueError as e:
+                    # Error de validación (ej: no hay suficientes pares)
+                    logger.error(f"❌ Error de validación en reversión: {str(e)}")
+                    raise HTTPException(400, detail=str(e))
+                    
+            else:
+                logger.info(f"ℹ️ Return normal (sin auto-formación de par)")
+            
+            # ==================== PROCESO NORMAL DE RECEPCIÓN ====================
+            logger.info(f"📥 Procesando recepción normal en bodega...")
+            
+            # Llamar al repository para confirmar recepción
             result = self.repository.confirm_return_reception(
                 return_id,
                 reception.dict(),
@@ -298,22 +354,299 @@ class WarehouseService:
                 self.company_id
             )
             
+            logger.info(f"✅ Recepción procesada exitosamente")
+            logger.info(f"   Inventario restaurado: {result['inventory_restored']}")
+            
+            # ==================== AGREGAR INFO DE REVERSIÓN A RESPUESTA ====================
+            response_message = result['message']
+            
+            if requires_pair_reversal and reversal_result and reversal_result.get('reversed'):
+                response_message = (
+                    f"{result['message']} "
+                    f"(Par auto-formado fue revertido a pies individuales)"
+                )
+                result['pair_reversal'] = reversal_result
+                
+                logger.info(f"✅ Respuesta enriquecida con info de reversión")
+            
             return {
                 "success": True,
-                "message": "Devolución recibida - Inventario restaurado automáticamente",
+                "message": response_message,
                 "return_id": result["return_id"],
                 "original_transfer_id": result["original_transfer_id"],
-                "received_quantity": result["received_quantity"],
-                "product_condition": result["product_condition"],
                 "inventory_restored": result["inventory_restored"],
-                "warehouse_location": result["warehouse_location"],
-                "inventory_change": result["inventory_change"]
+                "warehouse_location": result["location"],
+                "inventory_type": result["inventory_type"],
+                "pair_reversal": reversal_result  # ✅ NUEVO
             }
             
         except ValueError as e:
+            logger.error(f"❌ Error de validación: {str(e)}")
             raise HTTPException(400, detail=str(e))
         except RuntimeError as e:
+            logger.error(f"❌ Error del sistema: {str(e)}")
             raise HTTPException(500, detail=str(e))
+        except Exception as e:
+            logger.exception(f"❌ Error inesperado: {str(e)}")
+            raise HTTPException(500, detail=f"Error inesperado: {str(e)}")
+    
+    
+    async def _reverse_pair_before_return(
+        self,
+        return_transfer: TransferRequest,
+        warehouse_keeper_id: int
+    ) -> Dict[str, Any]:
+        """
+        🆕 Revertir par auto-formado antes de procesar devolución
+        ✅ OPCIÓN 1: Reversión Simétrica con validación de pares disponibles
+        
+        Escenario:
+        - Vendedor recibió pie individual (Transfer A)
+        - Sistema auto-formó par con pie opuesto existente
+        - Vendedor devuelve Transfer A
+        - ANTES de restaurar inventario en bodega:
+          1. Validar que hay suficientes pares disponibles
+          2. Separar el par en pies individuales
+          3. El pie devuelto irá a bodega
+          4. El pie opuesto se queda con el vendedor
+        
+        Validación CRÍTICA:
+        - Si el vendedor vendió algunos pares, solo puede devolver
+          hasta la cantidad de pares que aún tiene disponibles
+        
+        Args:
+            return_transfer: El TransferRequest de return que tiene auto_formed_pair_id
+            warehouse_keeper_id: ID del bodeguero que procesa
+        
+        Returns:
+            Dict con resultado de la reversión
+        """
+        
+        try:
+            logger.info(f"🔄 Iniciando reversión de par auto-formado")
+            logger.info(f"   Return Transfer ID: {return_transfer.id}")
+            logger.info(f"   Original Transfer ID: {return_transfer.original_transfer_id}")
+            logger.info(f"   Vinculado con Transfer ID: {return_transfer.auto_formed_pair_id}")
+            logger.info(f"   Tipo a devolver: {return_transfer.inventory_type}")
+            logger.info(f"   Cantidad a devolver: {return_transfer.quantity}")
+            
+            # ==================== OBTENER TRANSFERENCIA ORIGINAL ====================
+            original_transfer = self.db.query(TransferRequest).filter(
+                TransferRequest.id == return_transfer.original_transfer_id
+            ).first()
+            
+            if not original_transfer:
+                raise ValueError("Transferencia original no encontrada")
+            
+            logger.info(f"✅ Transfer original encontrado")
+            
+            # ==================== OBTENER UBICACIÓN DEL VENDEDOR ====================
+            # El vendedor está en destination_location del transfer original
+            vendor_location = self.db.query(Location).filter(
+                and_(
+                    Location.id == original_transfer.destination_location_id,
+                    Location.company_id == self.company_id
+                )
+            ).first()
+            
+            if not vendor_location:
+                raise ValueError("Ubicación del vendedor no encontrada")
+            
+            logger.info(f"✅ Ubicación vendedor: {vendor_location.name}")
+            
+            # ==================== OBTENER PRODUCTO ====================
+            product = self.db.query(Product).filter(
+                and_(
+                    Product.reference_code == return_transfer.sneaker_reference_code,
+                    Product.company_id == self.company_id
+                )
+            ).first()
+            
+            if not product:
+                raise ValueError(f"Producto {return_transfer.sneaker_reference_code} no encontrado")
+            
+            logger.info(f"✅ Producto encontrado: {product.reference_code}")
+            
+            # ==================== BUSCAR EL PAR EN EL LOCAL DEL VENDEDOR ====================
+            pair_inventory = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product.id,
+                    ProductSize.size == return_transfer.size,
+                    ProductSize.location_name == vendor_location.name,
+                    ProductSize.inventory_type == 'pair',
+                    ProductSize.company_id == self.company_id
+                )
+            ).with_for_update().first()
+            
+            # ==================== ✅ VALIDACIÓN CRÍTICA: PARES DISPONIBLES ====================
+            quantity_to_return = return_transfer.quantity
+            available_pairs = pair_inventory.quantity if pair_inventory else 0
+            
+            logger.info(f"📊 Validación de disponibilidad:")
+            logger.info(f"   Pies a devolver: {quantity_to_return}")
+            logger.info(f"   Pares disponibles: {available_pairs}")
+            
+            if available_pairs < quantity_to_return:
+                # ❌ NO hay suficientes pares para revertir
+                pairs_missing = quantity_to_return - available_pairs
+                
+                logger.error(f"❌ DEVOLUCIÓN BLOQUEADA")
+                logger.error(f"   Pies a devolver: {quantity_to_return}")
+                logger.error(f"   Pares disponibles: {available_pairs}")
+                logger.error(f"   Pares faltantes: {pairs_missing}")
+                logger.error(f"   Posiblemente vendidos: {pairs_missing}")
+                
+                error_message = (
+                    f"❌ No puedes devolver {quantity_to_return} pie(s) porque "
+                    f"solo quedan {available_pairs} par(es) disponibles en tu inventario.\n\n"
+                    f"📊 Análisis de la situación:\n"
+                    f"  • Pies recibidos originalmente: {quantity_to_return}\n"
+                    f"  • Pares formados automáticamente: {quantity_to_return}\n"
+                    f"  • Pares actualmente en inventario: {available_pairs}\n"
+                    f"  • Pares posiblemente vendidos: {pairs_missing}\n\n"
+                    f"💡 Solución:\n"
+                    f"  Solo puedes devolver hasta {available_pairs} pie(s).\n"
+                    f"  Para devolver más, los pares deben estar disponibles en tu inventario.\n\n"
+                    f"📝 Nota: Si vendiste los pares, no puedes devolver esos pies."
+                )
+                
+                raise ValueError(error_message)
+            
+            logger.info(f"✅ Validación OK: Hay suficientes pares disponibles")
+            
+            pair_qty_before = available_pairs
+            
+            # ==================== REVERTIR: RESTAR DEL PAR ====================
+            pair_inventory.quantity -= quantity_to_return
+            pair_inventory.updated_at = datetime.now()
+            
+            logger.info(f"✅ Par decrementado: {pair_qty_before} → {pair_inventory.quantity}")
+            
+            # ==================== BUSCAR/CREAR PIE IZQUIERDO ====================
+            left_foot = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product.id,
+                    ProductSize.size == return_transfer.size,
+                    ProductSize.location_name == vendor_location.name,
+                    ProductSize.inventory_type == 'left_only',
+                    ProductSize.company_id == self.company_id
+                )
+            ).with_for_update().first()
+            
+            if left_foot:
+                left_before = left_foot.quantity
+                left_foot.quantity += quantity_to_return
+                left_foot.updated_at = datetime.now()
+                logger.info(f"✅ Pie izquierdo incrementado: {left_before} → {left_foot.quantity}")
+            else:
+                left_foot = ProductSize(
+                    product_id=product.id,
+                    size=return_transfer.size,
+                    quantity=quantity_to_return,
+                    inventory_type='left_only',
+                    location_name=vendor_location.name,
+                    company_id=self.company_id,
+                    created_at=datetime.now(),
+                    updated_at=datetime.now()
+                )
+                self.db.add(left_foot)
+                logger.info(f"✅ Pie izquierdo creado: quantity={quantity_to_return}")
+            
+            # ==================== BUSCAR/CREAR PIE DERECHO ====================
+            right_foot = self.db.query(ProductSize).filter(
+                and_(
+                    ProductSize.product_id == product.id,
+                    ProductSize.size == return_transfer.size,
+                    ProductSize.location_name == vendor_location.name,
+                    ProductSize.inventory_type == 'right_only',
+                    ProductSize.company_id == self.company_id
+                )
+            ).with_for_update().first()
+            
+            if right_foot:
+                right_before = right_foot.quantity
+                right_foot.quantity += quantity_to_return
+                right_foot.updated_at = datetime.now()
+                logger.info(f"✅ Pie derecho incrementado: {right_before} → {right_foot.quantity}")
+            else:
+                right_foot = ProductSize(
+                    product_id=product.id,
+                    size=return_transfer.size,
+                    quantity=quantity_to_return,
+                    inventory_type='right_only',
+                    location_name=vendor_location.name,
+                    company_id=self.company_id,
+                    created_at=datetime.now(),
+                    updated_at=datetime.now()
+                )
+                self.db.add(right_foot)
+                logger.info(f"✅ Pie derecho creado: quantity={quantity_to_return}")
+            
+            # ==================== REGISTRAR EN HISTORIAL ====================
+            opposite_foot_type = 'left_only' if return_transfer.inventory_type == 'right_only' else 'right_only'
+            
+            reversal_change = InventoryChange(
+                product_id=product.id,
+                change_type='pair_reversal_for_return',
+                size=return_transfer.size,
+                quantity_before=pair_qty_before,
+                quantity_after=pair_inventory.quantity,
+                user_id=warehouse_keeper_id,
+                reference_id=return_transfer.id,
+                company_id=self.company_id,
+                notes=(
+                    f"REVERSIÓN DE PAR AUTO-FORMADO\n"
+                    f"Return Transfer: #{return_transfer.id}\n"
+                    f"Original Transfer: #{return_transfer.original_transfer_id}\n"
+                    f"Ubicación: {vendor_location.name}\n"
+                    f"Cantidad revertida: {quantity_to_return} par(es)\n"
+                    f"\n"
+                    f"Cambios en inventario:\n"
+                    f"  • pair: {pair_qty_before} → {pair_inventory.quantity}\n"
+                    f"  • left_only: +{quantity_to_return} (ahora {left_foot.quantity})\n"
+                    f"  • right_only: +{quantity_to_return} (ahora {right_foot.quantity})\n"
+                    f"\n"
+                    f"⚠️ Pie {return_transfer.inventory_type} se devolverá a bodega\n"
+                    f"✅ Pie {opposite_foot_type} queda con vendedor para formar pares futuros"
+                ),
+                created_at=datetime.now()
+            )
+            self.db.add(reversal_change)
+            
+            # ==================== COMMIT ====================
+            self.db.commit()
+            
+            logger.info(f"🎉 ¡REVERSIÓN COMPLETADA EXITOSAMENTE!")
+            logger.info(f"   Pares revertidos: {quantity_to_return}")
+            logger.info(f"   Pares restantes: {pair_inventory.quantity}")
+            logger.info(f"   Pies {return_transfer.inventory_type} listos para devolución")
+            logger.info(f"   Pies {opposite_foot_type} quedan con vendedor")
+            
+            return {
+                "reversed": True,
+                "quantity_reversed": quantity_to_return,
+                "pairs_remaining": pair_inventory.quantity,
+                "message": f"{quantity_to_return} par(es) revertido(s) exitosamente",
+                "location": vendor_location.name,
+                "details": {
+                    "pair_before": pair_qty_before,
+                    "pair_after": pair_inventory.quantity,
+                    "left_only": left_foot.quantity,
+                    "right_only": right_foot.quantity,
+                    "foot_returned": return_transfer.inventory_type,
+                    "foot_kept_by_vendor": opposite_foot_type
+                }
+            }
+            
+        except ValueError:
+            # Re-raise validation errors
+            self.db.rollback()
+            raise
+        except Exception as e:
+            logger.exception(f"❌ Error revirtiendo par: {str(e)}")
+            self.db.rollback()
+            raise ValueError(f"Error al revertir par: {str(e)}")
+    
 
     async def confirm_delivery(
         self,

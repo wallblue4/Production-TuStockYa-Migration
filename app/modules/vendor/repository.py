@@ -372,6 +372,7 @@ class VendorRepository:
                 'size': transfer.size,
                 'quantity': transfer.quantity,
                 'purpose': transfer.purpose,
+                'inventory_type': transfer.inventory_type,
                 'priority': 'high' if transfer.purpose == 'cliente' else 'normal',
                 'requested_at': transfer.requested_at.isoformat(),
                 'completed_at': transfer.delivered_at.isoformat() if transfer.delivered_at else None,
