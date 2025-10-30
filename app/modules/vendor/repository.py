@@ -341,20 +341,39 @@ class VendorRepository:
         return priority, next_action, action_required
 
     def get_completed_transfers_today(self, user_id: int, company_id: int) -> List[Dict[str, Any]]:
-        """Obtener transferencias completadas del día - FILTRADO POR COMPANY_ID"""
+        """Obtener transferencias completadas del día e incluir precio unitario desde products."""
         today = date.today()
-        
-        transfers = self.db.query(TransferRequest).filter(
-            and_(
-                TransferRequest.requester_id == user_id,
-                TransferRequest.company_id == company_id,
-                TransferRequest.status.in_(['completed', 'cancelled']),
-                func.date(TransferRequest.confirmed_reception_at) == today
+
+        # LEFT JOIN con products por reference_code para obtener unit_price.
+        # Usamos MAX(unit_price) y GROUP BY para evitar duplicados si existen múltiples filas por referencia.
+        transfers_with_price = (
+            self.db.query(
+                TransferRequest,
+                func.max(Product.unit_price).label('unit_price')
             )
-        ).order_by(TransferRequest.delivered_at.desc()).all()
-        
+            .outerjoin(
+                Product,
+                and_(
+                    Product.reference_code == TransferRequest.sneaker_reference_code,
+                    Product.company_id == TransferRequest.company_id
+                )
+            )
+            .filter(
+                and_(
+                    TransferRequest.requester_id == user_id,
+                    TransferRequest.company_id == company_id,
+                    TransferRequest.status.in_(['completed', 'cancelled']),
+                    func.date(TransferRequest.confirmed_reception_at) == today,
+                    TransferRequest.original_transfer_id.is_(None)
+                )
+            )
+            .group_by(TransferRequest.id)
+            .order_by(TransferRequest.delivered_at.desc())
+            .all()
+        )
+
         result = []
-        for transfer in transfers:
+        for transfer, unit_price in transfers_with_price:
             # Calcular duración total
             if transfer.delivered_at and transfer.requested_at:
                 duration = transfer.delivered_at - transfer.requested_at
@@ -362,7 +381,7 @@ class VendorRepository:
                 duration_str = f"{hours}h" if hours > 0 else f"{int(duration.total_seconds() // 60)}m"
             else:
                 duration_str = "N/A"
-            
+
             result.append({
                 'id': transfer.id,
                 'status': transfer.status,
@@ -377,9 +396,10 @@ class VendorRepository:
                 'requested_at': transfer.requested_at.isoformat(),
                 'completed_at': transfer.delivered_at.isoformat() if transfer.delivered_at else None,
                 'duration': duration_str,
-                'next_action': 'Completado' if transfer.status == 'completed' else 'Cancelado'
+                'next_action': 'Completado' if transfer.status == 'completed' else 'Cancelado',
+                'unit_price': float(unit_price) if unit_price is not None else None
             })
-        
+
         return result
     
     def get_vendor_pickup_assignments(self, vendor_id: int, company_id: int) -> List[Dict[str, Any]]:
